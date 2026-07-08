@@ -75,21 +75,19 @@ class TextJEPA(nn.Module):
         h = self.encoder(pixel_values=x).last_hidden_state[:, 0]
         return self.projector(h)
 
-    def forward(self, full, masked):
+    def forward(self, full, masked, lam=0.1):
         z_full = self.encode(full)
         z_masked = self.encode(masked)
-        return z_full, z_masked
-
-    def loss(self, full, masked, lam=0.1):
-        z_full, z_masked = self.forward(full, masked)
         inv = F.mse_loss(z_full, z_masked)
         z = torch.stack([z_full, z_masked])  # (2, B, D)
         reg = self.sigreg(z)
-        return inv + lam * reg, {
+        loss = inv + lam * reg
+        stats = {
             "inv": inv.detach(),
             "reg": reg.detach(),
             "z_std": z_full.std(dim=0).mean().detach(),
         }
+        return loss, stats
 
 
 if __name__ == "__main__":
@@ -98,5 +96,5 @@ if __name__ == "__main__":
     print("params(M):", round(n / 1e6, 2))
     full = torch.randn(8, 3, 224, 224)
     masked = torch.randn(8, 3, 224, 224)
-    loss, stats = m.loss(full, masked)
-    print("loss:", float(loss), {k: float(v) for k, v in stats.items()})
+    loss, stats = m(full, masked)
+    print("loss:", loss.item(), {k: float(v) for k, v in stats.items()})
