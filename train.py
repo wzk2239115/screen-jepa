@@ -16,6 +16,12 @@ def build_args():
     p = argparse.ArgumentParser()
     # data
     p.add_argument("--corpus_txt", default=None)
+    p.add_argument("--hf_dataset", default=None,
+                   help="e.g. PleIAs/common_corpus (streaming, uses HF cache)")
+    p.add_argument("--hf_config", default=None)
+    p.add_argument("--hf_split", default="train")
+    p.add_argument("--language", default=None,
+                   help="filter HF dataset 'language' column, e.g. English")
     p.add_argument("--parquet_path",
                    default="/home/wzk/projects/screen-jepa/data/common_corpus_sample/common_corpus_1/subset_100_1.parquet")
     p.add_argument("--max_sentences", type=int, default=20000)
@@ -85,7 +91,9 @@ def main():
     device = "cuda"
 
     sents = load_sentences(args.corpus_txt, args.parquet_path,
-                           args.max_sentences, ascii_only=bool(args.ascii_only))
+                           args.max_sentences, ascii_only=bool(args.ascii_only),
+                           hf_dataset=args.hf_dataset, hf_config=args.hf_config,
+                           hf_split=args.hf_split, language=args.language)
     if len(sents) < 100:
         raise RuntimeError(f"only {len(sents)} sentences loaded; check corpus")
     print(f"[data] sentences: {len(sents)}")

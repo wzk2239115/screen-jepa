@@ -9,31 +9,19 @@ from render import TextRenderer
 DEFAULT_PARQUET = "/home/wzk/projects/screen-jepa/data/common_corpus_sample/common_corpus_1/subset_100_1.parquet"
 
 
-def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=20000,
-                   min_words=5, max_words=25, ascii_only=True):
-    """Load and clean a list of sentences from a txt file, falling back to a
-    local parquet text column. Filters by length and (optionally) ascii."""
-    if corpus_txt:
-        with open(corpus_txt, encoding="utf-8", errors="ignore") as f:
-            text = f.read()
-    else:
-        import pandas as pd
+def _filter_sentence(c, min_words, max_words, ascii_only):
+    c = " ".join(c.split())
+    n = len(c.split())
+    if not (min_words <= n <= max_words):
+        return None
+    if not (10 <= len(c) <= 160):
+        return None
+    if ascii_only and not c.isascii():
+        return None
+    return c
 
-        df = pd.read_parquet(parquet_path)
-        text = "\n".join(df["text"].dropna().astype(str).tolist())
 
-    cands = []
-    for chunk in re.split(r"(?<=[.!?])\s+", text):
-        c = " ".join(chunk.split())
-        n = len(c.split())
-        if not (min_words <= n <= max_words):
-            continue
-        if not (10 <= len(c) <= 160):
-            continue
-        if ascii_only and not c.isascii():
-            continue
-        cands.append(c)
-
+def _dedup(cands, max_sentences):
     seen, out = set(), []
     for s in cands:
         if s in seen:
@@ -43,6 +31,50 @@ def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=
         if len(out) >= max_sentences:
             break
     return out
+
+
+def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=20000,
+                   min_words=5, max_words=25, ascii_only=True,
+                   hf_dataset=None, hf_config=None, hf_split="train", language=None):
+    """Load and clean a list of sentences.
+
+    Priority: corpus_txt > hf_dataset (streaming, uses HF cache) > local parquet.
+    Streaming from a HF dataset stops as soon as max_sentences are collected.
+    Optional `language` filters the dataset's 'language' column (e.g. 'English')."""
+    cands = []
+
+    if hf_dataset:
+        from datasets import load_dataset
+
+        ds = load_dataset(hf_dataset, hf_config, split=hf_split, streaming=True)
+        for row in ds:
+            if language is not None and row.get("language") != language:
+                continue
+            text = row.get("text")
+            if not text:
+                continue
+            for chunk in re.split(r"(?<=[.!?])\s+", text):
+                c = _filter_sentence(chunk, min_words, max_words, ascii_only)
+                if c is not None:
+                    cands.append(c)
+            if len(cands) >= max_sentences * 4:
+                break
+        return _dedup(cands, max_sentences)
+
+    if corpus_txt:
+        with open(corpus_txt, encoding="utf-8", errors="ignore") as f:
+            text = f.read()
+    else:
+        import pandas as pd
+
+        df = pd.read_parquet(parquet_path)
+        text = "\n".join(df["text"].dropna().astype(str).tolist())
+
+    for chunk in re.split(r"(?<=[.!?])\s+", text):
+        c = _filter_sentence(chunk, min_words, max_words, ascii_only)
+        if c is not None:
+            cands.append(c)
+    return _dedup(cands, max_sentences)
 
 
 def to_tensor(a):
