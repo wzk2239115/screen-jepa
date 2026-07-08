@@ -1,6 +1,7 @@
 # screen-jepa: pixel-text JEPA pretraining
 torch==2.12.0
 transformers==5.9.0
+huggingface-hub==1.16.4
 numpy==1.26.4
 pillow==12.2.0
 pandas==2.3.3
