@@ -5,3 +5,4 @@ numpy==1.26.4
 pillow==12.2.0
 pandas==2.3.3
 pyarrow==23.0.1
+tqdm==4.67.3

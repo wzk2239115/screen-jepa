@@ -10,6 +10,7 @@ import torch.distributed as dist
 import torch.nn.functional as Fn
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler, random_split
+from tqdm import tqdm
 
 from dataset import TextImageDataset, load_sentences
 from model import TextJEPA
@@ -172,7 +173,9 @@ def main():
             sampler.set_epoch(epoch)
         model.train()
         t0 = time.time()
-        for full, masked in train:
+        bar = tqdm(train, desc=f"e{epoch}", disable=not is_main,
+                   dynamic_ncols=True, mininterval=1.0)
+        for full, masked in bar:
             full = full.to(device, non_blocking=True)
             masked = masked.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
@@ -190,18 +193,17 @@ def main():
                     cos = Fn.cosine_similarity(zf, zm, dim=-1).mean().item()
                     zstd = zf.std(dim=0).mean().item()
                     dead = (zf.std(dim=0) < 1e-2).float().mean().item()
-                dt = (time.time() - t0) / max(1, (step % args.log_every) or args.log_every)
-                print(f"e{epoch} s{step:>6} loss={loss.item():.4f} "
-                      f"inv={float(stats['inv']):.4f} reg={float(stats['reg']):.4f} "
-                      f"std={zstd:.3f} dead={dead:.3f} cos={cos:.3f} "
-                      f"lr={sched.get_last_lr()[0]:.2e} {dt:.2f}s/it", flush=True)
+                bar.set_postfix(loss=f"{loss.item():.4f}", inv=f"{float(stats['inv']):.4f}",
+                                std=f"{zstd:.3f}", dead=f"{dead:.3f}",
+                                cos=f"{cos:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
                 with csv_path.open("a", newline="") as f:
                     csv.writer(f).writerow([epoch, step, f"{loss.item():.5f}",
                                             f"{float(stats['inv']):.5f}",
                                             f"{float(stats['reg']):.5f}",
                                             f"{zstd:.5f}", f"{dead:.5f}",
                                             f"{cos:.5f}",
-                                            f"{sched.get_last_lr()[0]:.3e}", f"{dt:.3f}"])
+                                            f"{sched.get_last_lr()[0]:.3e}",
+                                            f"{bar.format_dict.get('rate') or 0.0:.3f}"])
             step += 1
 
         if is_main:
