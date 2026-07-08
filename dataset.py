@@ -65,10 +65,16 @@ def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=
         with open(corpus_txt, encoding="utf-8", errors="ignore") as f:
             text = f.read()
     else:
+        import glob
+
         import pandas as pd
 
-        df = pd.read_parquet(parquet_path)
-        text = "\n".join(df["text"].dropna().astype(str).tolist())
+        paths = sorted(glob.glob(parquet_path)) if any(ch in parquet_path for ch in "*?") else [parquet_path]
+        texts = []
+        for p in paths:
+            df = pd.read_parquet(p)
+            texts.extend(df["text"].dropna().astype(str).tolist())
+        text = "\n".join(texts)
 
     for chunk in re.split(r"(?<=[.!?])\s+", text):
         c = _filter_sentence(chunk, min_words, max_words, ascii_only)
