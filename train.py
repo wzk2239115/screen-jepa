@@ -40,7 +40,8 @@ def build_args():
     p.add_argument("--patch_size", type=int, default=16,
                    help="16=fast but ~1.3 chars/patch (char-blind); 8 or 4 resolves glyphs")
     p.add_argument("--arch", default="vit",
-                   choices=["vit", "convnext", "convvit", "windowvit"])
+                   choices=["vit", "convnext", "convvit", "windowvit",
+                            "hiera", "pvt", "retina", "efficient", "mamba"])
     # optim
     p.add_argument("--batch", type=int, default=192)
     p.add_argument("--lr", type=float, default=6e-4)
