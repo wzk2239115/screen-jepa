@@ -56,23 +56,35 @@ class TextJEPA(nn.Module):
     """
 
     def __init__(self, hidden=384, layers=8, heads=6, mlp_dim=2048,
-                 patch=16, img_size=224, embed_dim=None):
+                 patch=16, img_size=224, embed_dim=None, arch="vit"):
         super().__init__()
-        cfg = ViTConfig(
-            hidden_size=hidden,
-            num_hidden_layers=layers,
-            num_attention_heads=heads,
-            intermediate_size=hidden * 4,
-            patch_size=patch,
-            image_size=img_size,
-            num_channels=3,
-        )
-        self.encoder = ViTModel(cfg)
-        self.projector = MLP(hidden, mlp_dim, embed_dim or hidden, norm_fn=nn.BatchNorm1d)
+        self.arch = arch.lower()
+        if self.arch == "vit":
+            cfg = ViTConfig(
+                hidden_size=hidden,
+                num_hidden_layers=layers,
+                num_attention_heads=heads,
+                intermediate_size=hidden * 4,
+                patch_size=patch,
+                image_size=img_size,
+                num_channels=3,
+            )
+            self.encoder = ViTModel(cfg)
+            enc_dim = hidden
+        else:
+            from backbones import build_encoder
+            self.encoder = build_encoder(
+                self.arch, img_size=img_size, dim=hidden, patch=patch,
+                depth=layers, heads=heads, in_chans=3)
+            enc_dim = self.encoder.out_dim
+        self.projector = MLP(enc_dim, mlp_dim, embed_dim or enc_dim, norm_fn=nn.BatchNorm1d)
         self.sigreg = SIGReg()
 
     def encode(self, x):
-        h = self.encoder(pixel_values=x).last_hidden_state[:, 0]
+        if self.arch == "vit":
+            h = self.encoder(pixel_values=x).last_hidden_state[:, 0]
+        else:
+            h = self.encoder(x)
         return self.projector(h)
 
     def forward(self, full, masked, lam=0.1):
