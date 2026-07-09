@@ -107,28 +107,54 @@ def to_tensor(a):
 
 
 class TextImageDataset(Dataset):
-    """Yields (full, masked) image-view pairs of the same rendered sentence."""
+    """Yields (full, masked[, cell_mask]) for a rendered sentence.
 
-    def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15, mask_min=1):
+    cell_mask (B optional): (grid*grid) bool marking feature-grid cells that fall
+    inside masked words' bboxes; used by the predictive JEPA objective."""
+
+    def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15,
+                 mask_min=1, grid=14, return_cell_mask=False):
         self.sents = sentences
         self.r = TextRenderer(img_size=img_size, font_size=font_size)
         self.mask_ratio = mask_ratio
         self.mask_min = mask_min
+        self.grid = grid
+        self.return_cell_mask = return_cell_mask
+        self.stride = img_size / grid
 
     def __len__(self):
         return len(self.sents)
 
+    def _cell_mask(self, boxes, idx, S):
+        g = self.grid
+        cm = torch.zeros(g, g, dtype=torch.bool)
+        for i in idx:
+            x0, y0, x1, y1 = boxes[i]
+            c0 = int(min(max(x0 / self.stride, 0), g - 1))
+            c1 = int(min(max((x1 - 1) / self.stride, 0), g - 1))
+            r0 = int(min(max(y0 / self.stride, 0), g - 1))
+            r1 = int(min(max((y1 - 1) / self.stride, 0), g - 1))
+            cm[r0:r1 + 1, c0:c1 + 1] = True
+        return cm.flatten()
+
     def __getitem__(self, i):
         full, boxes = self.r.render(self.sents[i])
+        S = self.r.img_size
         n = len(boxes)
         if n == 0:
-            full = np.full((self.r.img_size, self.r.img_size, 3), 255, dtype=np.uint8)
-            return to_tensor(full), to_tensor(full.copy())
+            full = np.full((S, S, 3), 255, dtype=np.uint8)
+            t = to_tensor(full)
+            if self.return_cell_mask:
+                return t, t.clone(), torch.zeros(self.grid * self.grid, dtype=torch.bool)
+            return t, t.clone()
         k = max(self.mask_min, int(round(n * self.mask_ratio)))
         k = min(k, n)
         idx = np.random.choice(n, size=k, replace=False)
         masked = self.r.mask_words(full, boxes, idx)
-        return to_tensor(full), to_tensor(masked)
+        full_t, masked_t = to_tensor(full), to_tensor(masked)
+        if self.return_cell_mask:
+            return full_t, masked_t, self._cell_mask(boxes, idx, S)
+        return full_t, masked_t
 
 
 if __name__ == "__main__":

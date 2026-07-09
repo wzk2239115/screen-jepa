@@ -57,12 +57,20 @@ class ConvNeXt(nn.Module):
             nn.Sequential(*[ConvNeXtBlock(dims[i]) for _ in range(depths[i])])
             for i in range(4)])
         self.final_norm = LayerNorm2d(dims[-1])
+        self.feature_dim = dims[2]
+        self.feature_grid = img_size // 16
 
-    def forward(self, x):
+    def forward(self, x, return_map=False):
+        feats = None
         for i in range(4):
             x = self.down_layers[i](x)
             x = self.stages[i](x)
+            if return_map and i == 2:
+                feats = x
         x = self.final_norm(x)
+        if return_map:
+            B, C, H, W = feats.shape
+            return feats.flatten(2).transpose(1, 2)
         return x.mean(dim=(2, 3))
 
 

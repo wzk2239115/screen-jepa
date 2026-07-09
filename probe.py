@@ -92,9 +92,16 @@ def main():
 
     ckpt = torch.load(args.ckpt, map_location=device, weights_only=False)
     ca = ckpt["args"]
-    model = TextJEPA(ca["hidden"], ca["layers"], ca["heads"], ca.get("mlp_dim", 3072),
-                     img_size=args.img_size, embed_dim=ca.get("embed_dim", 0) or ca["hidden"],
-                     patch=ca.get("patch_size", 16), arch=ca.get("arch", "vit")).to(device)
+    if ca.get("objective") == "predictive":
+        from pred_model import PredictiveJEPA
+        model = PredictiveJEPA(arch=ca.get("arch", "convnext"), img_size=args.img_size,
+                               hidden=ca["hidden"], layers=ca["layers"], heads=ca["heads"],
+                               patch=ca.get("patch_size", 16),
+                               pred_depth=ca.get("pred_depth", 4)).to(device)
+    else:
+        model = TextJEPA(ca["hidden"], ca["layers"], ca["heads"], ca.get("mlp_dim", 3072),
+                         img_size=args.img_size, embed_dim=ca.get("embed_dim", 0) or ca["hidden"],
+                         patch=ca.get("patch_size", 16), arch=ca.get("arch", "vit")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
     renderer = TextRenderer(img_size=args.img_size, font_path=args.font_path)
