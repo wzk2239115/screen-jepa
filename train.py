@@ -166,6 +166,10 @@ def main():
         with csv_path.open("w", newline="") as f:
             csv.writer(f).writerow(["epoch", "step", "loss", "inv", "reg", "z_std",
                                     "dead_dim", "cos", "lr", "dt_s"])
+        val_csv_path = Path(args.out) / "val_log.csv"
+        with val_csv_path.open("w", newline="") as f:
+            csv.writer(f).writerow(["epoch", "inv", "z_std", "dead_dim",
+                                    "cos_same", "cos_diff", "margin"])
 
     step = 0
     for epoch in range(args.epochs):
@@ -210,6 +214,10 @@ def main():
             v_inv, v_std, v_dead, v_same, v_diff = evaluate(base, val, device, amp)
             print(f"== epoch {epoch} val: inv={v_inv:.4f} std={v_std:.3f} dead={v_dead:.3f} "
                   f"cos_same={v_same:.3f} cos_diff={v_diff:.3f} margin={v_same-v_diff:.3f} ==", flush=True)
+            with val_csv_path.open("a", newline="") as f:
+                csv.writer(f).writerow([epoch, f"{v_inv:.5f}", f"{v_std:.5f}",
+                                        f"{v_dead:.5f}", f"{v_same:.5f}",
+                                        f"{v_diff:.5f}", f"{v_same-v_diff:.5f}"])
             if (epoch + 1) % args.save_every == 0 or (epoch + 1) == args.epochs:
                 torch.save({"model": base.state_dict(), "args": vars(args)},
                            Path(args.out) / f"epoch{epoch}.pt")
