@@ -37,6 +37,8 @@ def build_args():
     p.add_argument("--heads", type=int, default=12)
     p.add_argument("--mlp_dim", type=int, default=3072)
     p.add_argument("--embed_dim", type=int, default=0)
+    p.add_argument("--patch_size", type=int, default=16,
+                   help="16=fast but ~1.3 chars/patch (char-blind); 8 or 4 resolves glyphs")
     # optim
     p.add_argument("--batch", type=int, default=192)
     p.add_argument("--lr", type=float, default=6e-4)
@@ -148,7 +150,7 @@ def main():
     val = DataLoader(val_ds, batch_size=args.batch, shuffle=False, num_workers=4)
 
     model = TextJEPA(args.hidden, args.layers, args.heads, args.mlp_dim,
-                     img_size=args.img_size, embed_dim=embed_dim).to(device)
+                     patch=args.patch_size, img_size=args.img_size, embed_dim=embed_dim).to(device)
     if world > 1:
         model = DDP(model, device_ids=[local_rank], static_graph=True)
     base = model.module if isinstance(model, DDP) else model
