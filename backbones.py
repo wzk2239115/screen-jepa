@@ -42,8 +42,9 @@ class ConvNeXtBlock(nn.Module):
 class ConvNeXt(nn.Module):
     """Pure ConvNeXt: hierarchical conv stages -> global avg pool."""
 
-    def __init__(self, img_size=224, dims=(64, 128, 256, 512), depths=(2, 2, 6, 2), in_chans=3):
+    def __init__(self, img_size=224, base_dim=96, depths=(2, 2, 6, 2), in_chans=3):
         super().__init__()
+        dims = (base_dim, base_dim * 2, base_dim * 4, base_dim * 8)
         self.out_dim = dims[-1]
         self.down_layers = nn.ModuleList()
         stem = nn.Sequential(
@@ -227,7 +228,7 @@ class WindowViT(nn.Module):
 def build_encoder(arch, img_size=224, dim=384, patch=16, depth=8, heads=6, in_chans=3):
     arch = arch.lower()
     if arch == "convnext":
-        return ConvNeXt(img_size=img_size)
+        return ConvNeXt(img_size=img_size, base_dim=max(48, dim // 4))
     if arch == "convvit":
         return ConvViT(img_size=img_size, dim=dim, depth=depth, heads=heads)
     if arch == "windowvit":
