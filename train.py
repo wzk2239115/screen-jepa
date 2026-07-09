@@ -120,13 +120,17 @@ def main():
     torch.manual_seed(args.seed)
 
     if is_main:
+        used_files = []
         sents = load_sentences(args.corpus_txt, args.parquet_path, args.max_sentences,
                                ascii_only=bool(args.ascii_only), hf_dataset=args.hf_dataset,
                                hf_config=args.hf_config, hf_split=args.hf_split,
-                               language=args.language)
+                               language=args.language, used=used_files)
         if len(sents) < 100:
             raise RuntimeError(f"only {len(sents)} sentences loaded; check corpus")
         print(f"[data] sentences: {len(sents)}", flush=True)
+        if used_files:
+            (out / "datasource.txt").write_text("\n".join(used_files))
+            print(f"[data] pinned parquet files -> {out/'datasource.txt'}", flush=True)
     else:
         sents = None
 

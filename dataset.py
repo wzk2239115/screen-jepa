@@ -35,7 +35,8 @@ def _dedup(cands, max_sentences):
 
 def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=20000,
                    min_words=5, max_words=25, ascii_only=True,
-                   hf_dataset=None, hf_config=None, hf_split="train", language=None):
+                   hf_dataset=None, hf_config=None, hf_split="train", language=None,
+                   used=None):
     """Load and clean a list of sentences.
 
     Priority: corpus_txt > hf_dataset (streaming, uses HF cache) > local parquet.
@@ -84,6 +85,8 @@ def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=
     target = max_sentences * 4
     cols = ["text"] + (["language"] if language is not None else [])
     for p in paths:
+        if used is not None:
+            used.append(p)
         df = pd.read_parquet(p, columns=cols)
         if language is not None and "language" in df.columns:
             df = df[df["language"] == language]
