@@ -75,7 +75,7 @@ def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=
 
     import pandas as pd
 
-    if any(ch in parquet_path for ch in "*?"):
+    if any(ch in parquet_path for ch in "*?["):
         paths = sorted(glob.glob(parquet_path, recursive=True))
     else:
         paths = [parquet_path]
