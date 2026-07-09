@@ -75,6 +75,24 @@ class TextRenderer:
             boxes.append((int(x0), int(y0), int(x1), int(y1)))
         return np.array(img), boxes
 
+    def render_centered(self, text, font_size=40):
+        """Render a single word/short text centered at a fixed font size (for probes)."""
+        S = self.img_size
+        img = Image.new("RGB", (S, S), (255, 255, 255))
+        draw = ImageDraw.Draw(img)
+        font = self._font(font_size)
+        bbox = draw.textbbox((0, 0), text, font=font)
+        w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        if w >= S - 2 * self.margin:
+            font_size = max(10, int(font_size * (S - 2 * self.margin) / w))
+            font = self._font(font_size)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            w, h = bbox[2] - bbox[0], bbox[3] - bbox[1]
+        x = (S - w) / 2 - bbox[0]
+        y = (S - h) / 2 - bbox[1]
+        draw.text((x, y), text, fill=(0, 0, 0), font=font)
+        return np.array(img)
+
     def mask_words(self, img, boxes, indices):
         """Erase selected words by filling their bboxes with the background."""
         pil = Image.fromarray(img.copy())
