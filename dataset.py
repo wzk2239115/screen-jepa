@@ -82,8 +82,11 @@ def load_sentences(corpus_txt=None, parquet_path=DEFAULT_PARQUET, max_sentences=
         raise FileNotFoundError(f"no parquet matched: {parquet_path}")
 
     target = max_sentences * 4
+    cols = ["text"] + (["language"] if language is not None else [])
     for p in paths:
-        df = pd.read_parquet(p, columns=["text"])
+        df = pd.read_parquet(p, columns=cols)
+        if language is not None and "language" in df.columns:
+            df = df[df["language"] == language]
         for text in df["text"].dropna().astype(str):
             for chunk in re.split(r"(?<=[.!?])\s+", text):
                 c = _filter_sentence(chunk, min_words, max_words, ascii_only)
