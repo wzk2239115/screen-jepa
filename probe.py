@@ -52,19 +52,24 @@ ANTONYMS = [
 
 
 @torch.no_grad()
-def encode_words(words, model, renderer, device, n_aug=4):
-    """Encode each unique word from n_aug dense renders (word fills canvas,
-    matching training distribution); average embeddings."""
+def encode_words(words, model, renderer, device, n_aug=4, mode="mean"):
+    """Encode each unique word from n_aug dense renders; average embeddings.
+    mode: 'mean' = pooled vector; 'flatten' = flattened spatial feature map
+    (exposes spatial word signal hidden by mean-pool)."""
     uniq = sorted(set(words))
     emb = {}
     for w in uniq:
         xs = []
         for _ in range(n_aug):
-            # dense auto-fit render (same as training), single word fills canvas
             img, _ = renderer.render(w)
             xs.append(to_tensor(img))
         x = torch.stack(xs).to(device)
-        z = model.encode(x).float()
+        with torch.no_grad():
+            if mode == "flatten" and hasattr(model, "encoder") and \
+                    hasattr(model.encoder, "feature_dim"):
+                z = model.encoder(x, return_map=True).float().flatten(1)
+            else:
+                z = model.encode(x).float()
         emb[w] = z.mean(0)
         emb[w] = emb[w] / (emb[w].norm() + 1e-8)
     return emb
@@ -83,6 +88,7 @@ def main():
     p.add_argument("--ckpt", required=True)
     p.add_argument("--img_size", type=int, default=224)
     p.add_argument("--font_path", default="/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+    p.add_argument("--mode", default="mean", choices=["mean", "flatten"])
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default=None)
     args = p.parse_args()
@@ -108,7 +114,8 @@ def main():
                             font_path=args.font_path)
 
     all_words = [w for pr in SYNONYMS + ANTONYMS for w in pr]
-    emb = encode_words(all_words, model, renderer, device)
+    emb = encode_words(all_words, model, renderer, device, mode=args.mode)
+    print(f"=== word-image semantic probe  [mode={args.mode}] ===")
 
     syn = pair_sims(SYNONYMS, emb)
     ant = pair_sims(ANTONYMS, emb)
@@ -121,7 +128,6 @@ def main():
     def stat(s):
         return f"mean={np.mean(s):.3f} std={np.std(s):.3f} n={len(s)}"
 
-    print("=== word-image semantic probe ===")
     print(f"synonyms : {stat(syn)}")
     print(f"antonyms : {stat(ant)}")
     print(f"random   : {stat(rnd)}")
