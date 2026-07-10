@@ -103,28 +103,27 @@ def main():
             labels.append(wi)
     X = torch.stack(embs).to(device)
     with torch.autocast("cuda", enabled=device == "cuda", dtype=torch.bfloat16):
-        Z = model.encode(X).float()
-    Z = Fn.normalize(Z, dim=-1).cpu()
+        if ca.get("objective") == "predictive":
+            fmap = model.encoder(X, return_map=True).float()  # (B,196,d)
+            modes = {"mean": fmap.mean(1), "flatten": fmap.flatten(1),
+                     "max": fmap.amax(1), "center": fmap[:, fmap.size(1) // 2]}
+        else:
+            modes = {"mean": model.encode(X).float()}
     labels = torch.tensor(labels)
 
-    sims = Z @ Z.t()
-    torch.diagonal(sims).fill_(-1)
-    nn = sims.argmax(dim=1)
-    top1 = (labels[nn] == labels).float().mean().item()
-
-    same, diff = [], []
-    for i in range(len(labels)):
-        for j in range(i + 1, len(labels)):
-            s = float(sims[i, j])
-            (same if labels[i] == labels[j] else diff).append(s)
-    same_m, diff_m = np.mean(same), np.mean(diff)
-
-    print(f"=== retrieval probe  (words={len(words)} repeats={args.repeats} n={len(labels)}) ===")
-    print(f"top-1 NN accuracy   : {top1:.3f}   (chance ~= {1/len(words):.4f})")
-    print(f"cos same-word       : {same_m:.3f}")
-    print(f"cos different-word  : {diff_m:.3f}")
-    print(f"gap (same - diff)   : {same_m-diff_m:+.3f}")
-    print(f"emb std             : {Z.std(0).mean().item():.3f}")
+    for name, Z in modes.items():
+        Z = Fn.normalize(Z, dim=-1).cpu()
+        sims = Z @ Z.t()
+        torch.diagonal(sims).fill_(-2)
+        nn = sims.argmax(dim=1)
+        top1 = (labels[nn] == labels).float().mean().item()
+        same, diff = [], []
+        for i in range(len(labels)):
+            for j in range(i + 1, len(labels)):
+                (same if labels[i] == labels[j] else diff).append(float(sims[i, j]))
+        print(f"[{name:7s}] top1={top1:.3f} (chance {1/len(words):.4f}) "
+              f"same={np.mean(same):.3f} diff={np.mean(diff):.3f} "
+              f"gap={np.mean(same)-np.mean(diff):+.3f} std={Z.std(0).mean().item():.3f} dim={Z.shape[1]}")
 
 
 if __name__ == "__main__":
