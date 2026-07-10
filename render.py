@@ -4,30 +4,26 @@ from PIL import Image, ImageDraw, ImageFont
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def geom_augment(img, bg_color=(255, 255, 255), max_angle=3.5, scale_lo=0.96,
-                 scale_hi=1.06, max_shear=2.5):
-    """Random scale + rotation + shear on an HxWx3 uint8 image, filling exposed
-    corners with bg_color. Prevents the model from keying on exact glyph layout."""
+def geom_augment(img, bg_color=(255, 255, 255), max_angle=2.0, scale_lo=0.92,
+                 scale_hi=1.0, max_shear=1.0):
+    """Gentle scale (zoom-OUT only, creates margin) + small rotation + shear.
+    Zooming out first leaves a border so rotation does not clip text out."""
     import random
 
     pil = Image.fromarray(img)
     S = pil.size[0]
-    # scale (zoom in/out then center crop/pad back)
+    # zoom out only -> paste centered on bg canvas (leaves margin)
     s = random.uniform(scale_lo, scale_hi)
     ns = max(8, int(round(S * s)))
     pil = pil.resize((ns, ns), Image.BICUBIC)
-    if ns >= S:
-        off = (ns - S) // 2
-        pil = pil.crop((off, off, off + S, off + S))
-    else:
-        canvas = Image.new("RGB", (S, S), bg_color)
-        canvas.paste(pil, ((S - ns) // 2, (S - ns) // 2))
-        pil = canvas
-    # shear (horizontal tilt) via affine, then rotation
+    canvas = Image.new("RGB", (S, S), bg_color)
+    canvas.paste(pil, ((S - ns) // 2, (S - ns) // 2))
+    pil = canvas
+    # tiny shear then small rotation, within the margin
     sh = random.uniform(-max_shear, max_shear)
-    cx = cy = S / 2
+    c = S / 2
     pil = pil.transform((S, S), Image.AFFINE,
-                        (1, sh, -sh * cy, 0, 1, 0), resample=Image.BICUBIC,
+                        (1, sh, -sh * c, 0, 1, 0), resample=Image.BICUBIC,
                         fillcolor=bg_color)
     ang = random.uniform(-max_angle, max_angle)
     pil = pil.rotate(ang, resample=Image.BICUBIC, fillcolor=bg_color)
