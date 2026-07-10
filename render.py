@@ -4,8 +4,8 @@ from PIL import Image, ImageDraw, ImageFont
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def geom_augment(img, bg_color=(255, 255, 255), max_angle=10, scale_lo=0.88,
-                 scale_hi=1.15, max_shear=6):
+def geom_augment(img, bg_color=(255, 255, 255), max_angle=3.5, scale_lo=0.96,
+                 scale_hi=1.06, max_shear=2.5):
     """Random scale + rotation + shear on an HxWx3 uint8 image, filling exposed
     corners with bg_color. Prevents the model from keying on exact glyph layout."""
     import random

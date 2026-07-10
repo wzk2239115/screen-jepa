@@ -69,8 +69,8 @@ def build_args():
                    help="vary font between views (prevent shape memorization)")
     p.add_argument("--font_pool", default=None,
                    help="comma-separated .ttf paths for font augmentation")
-    p.add_argument("--geom_augment", type=int, default=0,
-                   help="random scale+rotation+shear on the augmented view")
+    p.add_argument("--geom_strength", type=int, default=0,
+                   help="0=off, 1=light, 2=medium geometry augmentation (scale/rotation/shear)")
     return p.parse_args()
 
 
@@ -169,7 +169,7 @@ def main():
                                bg_augment=bool(args.bg_augment),
                                font_augment=bool(args.font_augment),
                                font_pool=args.font_pool,
-                               geom_augment=bool(args.geom_augment))
+                               geom_strength=args.geom_strength)
     train_ds, val_ds = random_split(full_ds, [n_train, n_val], generator=g)
 
     if world > 1:

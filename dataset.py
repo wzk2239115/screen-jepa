@@ -117,6 +117,12 @@ def to_tensor(a):
     return (t - 0.5) / 0.5
 
 
+GEOM_PRESETS = {
+    1: dict(max_angle=3.5, scale_lo=0.96, scale_hi=1.06, max_shear=2.5),   # light
+    2: dict(max_angle=7.0, scale_lo=0.92, scale_hi=1.12, max_shear=5.0),   # medium
+}
+
+
 class TextImageDataset(Dataset):
     """Yields (full, masked[, cell_mask]) for a rendered sentence.
 
@@ -125,7 +131,7 @@ class TextImageDataset(Dataset):
 
     def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15,
                  mask_min=1, grid=14, return_cell_mask=False, bg_augment=False,
-                 font_augment=False, font_pool=None, geom_augment=False):
+                 font_augment=False, font_pool=None, geom_strength=0):
         self.sents = sentences
         self.mask_ratio = mask_ratio
         self.mask_min = mask_min
@@ -133,7 +139,7 @@ class TextImageDataset(Dataset):
         self.return_cell_mask = return_cell_mask
         self.bg_augment = bg_augment
         self.font_augment = font_augment
-        self.do_geom = geom_augment
+        self.geom_strength = geom_strength
         self.stride = img_size / grid
         pool = (font_pool.split(",") if font_pool else DEFAULT_FONTS)
         pool = [p for p in pool if os.path.exists(p)] or [DEFAULT_FONT]
@@ -179,13 +185,13 @@ class TextImageDataset(Dataset):
         k = max(self.mask_min, int(round(n * self.mask_ratio)))
         k = min(k, n)
         idx = np.random.choice(n, size=k, replace=False)
-        if self.bg_augment or self.font_augment or self.do_geom:
+        if self.bg_augment or self.font_augment or self.geom_strength:
             r2 = self._pick()
             bg = self._rand_bg() if self.bg_augment else (255, 255, 255)
             alt, boxes2 = r2.render(sent, bg_color=bg)
             masked = r2.mask_words(alt, boxes2, idx, bg_color=bg)
-            if self.do_geom:
-                masked = geom_augment(masked, bg_color=bg)
+            if self.geom_strength:
+                masked = geom_augment(masked, bg_color=bg, **GEOM_PRESETS[self.geom_strength])
             cell_boxes = boxes2
         else:
             masked = r1.mask_words(full, boxes, idx)
