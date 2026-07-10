@@ -18,6 +18,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from backbones import TransformerBlock, build_encoder
+from model import SIGReg
 
 
 def _ema_update(encoder, target, tau):
@@ -51,6 +52,7 @@ class PredictiveJEPA(nn.Module):
         self.target_encoder = copy.deepcopy(self.encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
+        self._sig = SIGReg()
 
     def encode(self, x):
         """Global embedding for eval/probe: mean of the trained stage features."""
@@ -88,10 +90,7 @@ class PredictiveJEPA(nn.Module):
             "mask_frac": cell_mask.float().mean().detach(),
         }
         if lam > 0:
-            from model import SIGReg
-            if not hasattr(self, "_sig"):
-                self._sig = SIGReg().to(ctx.device)
-            reg = self._sig(ctx.transpose(0, 1))
+            reg = self._sig(ctx.to(self._sig.t.device).transpose(0, 1))
             stats["reg"] = reg.detach()
             return pred_loss + lam * reg, stats
         return pred_loss, stats
