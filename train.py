@@ -61,7 +61,10 @@ def build_args():
     p.add_argument("--objective", default="invariance", choices=["invariance", "predictive"])
     p.add_argument("--pred_depth", type=int, default=4)
     p.add_argument("--ema_tau", type=float, default=0.996)
+    p.add_argument("--target_mode", default="ema", choices=["ema", "stopgrad"])
     p.add_argument("--grid", type=int, default=14)
+    p.add_argument("--bg_augment", type=int, default=0,
+                   help="vary background color between views (force text-focus)")
     return p.parse_args()
 
 
@@ -156,7 +159,8 @@ def main():
     g = torch.Generator().manual_seed(args.seed)
     is_pred = args.objective == "predictive"
     full_ds = TextImageDataset(sents, args.img_size, args.font_size, args.mask_ratio,
-                               grid=args.grid, return_cell_mask=is_pred)
+                               grid=args.grid, return_cell_mask=is_pred,
+                               bg_augment=bool(args.bg_augment))
     train_ds, val_ds = random_split(full_ds, [n_train, n_val], generator=g)
 
     if world > 1:
@@ -174,7 +178,8 @@ def main():
         from pred_model import PredictiveJEPA
         model = PredictiveJEPA(arch=args.arch, img_size=args.img_size, hidden=args.hidden,
                                layers=args.layers, heads=args.heads, patch=args.patch_size,
-                               pred_depth=args.pred_depth, ema_tau=args.ema_tau).to(device)
+                               pred_depth=args.pred_depth, ema_tau=args.ema_tau,
+                               target_mode=args.target_mode).to(device)
         ddp_kw = dict(device_ids=[local_rank], find_unused_parameters=True)
     else:
         model = TextJEPA(args.hidden, args.layers, args.heads, args.mlp_dim,

@@ -113,14 +113,19 @@ class TextImageDataset(Dataset):
     inside masked words' bboxes; used by the predictive JEPA objective."""
 
     def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15,
-                 mask_min=1, grid=14, return_cell_mask=False):
+                 mask_min=1, grid=14, return_cell_mask=False, bg_augment=False):
         self.sents = sentences
         self.r = TextRenderer(img_size=img_size, font_size=font_size)
         self.mask_ratio = mask_ratio
         self.mask_min = mask_min
         self.grid = grid
         self.return_cell_mask = return_cell_mask
+        self.bg_augment = bg_augment
         self.stride = img_size / grid
+
+    @staticmethod
+    def _rand_bg():
+        return tuple(int(np.random.randint(150, 256)) for _ in range(3))
 
     def __len__(self):
         return len(self.sents)
@@ -150,7 +155,12 @@ class TextImageDataset(Dataset):
         k = max(self.mask_min, int(round(n * self.mask_ratio)))
         k = min(k, n)
         idx = np.random.choice(n, size=k, replace=False)
-        masked = self.r.mask_words(full, boxes, idx)
+        if self.bg_augment:
+            bg = self._rand_bg()
+            alt, _ = self.r.render(self.sents[i], bg_color=bg)
+            masked = self.r.mask_words(alt, boxes, idx, bg_color=bg)
+        else:
+            masked = self.r.mask_words(full, boxes, idx)
         full_t, masked_t = to_tensor(full), to_tensor(masked)
         if self.return_cell_mask:
             return full_t, masked_t, self._cell_mask(boxes, idx, S)

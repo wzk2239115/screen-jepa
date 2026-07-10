@@ -62,18 +62,21 @@ class TextRenderer:
             best_font = font
         return best_font, best_lh, best_pl
 
-    def render(self, sentence):
-        """Return (img: HxWx3 uint8, word_boxes: list[(x0,y0,x1,y1)]).
-        Also stores self.last_font / self.last_font_size for compositing."""
+    def render(self, sentence, bg_color=(255, 255, 255)):
+        """Return (img: HxWx3 uint8, word_boxes). bg_color sets background;
+        text color auto-contrasts. Stores self.last_font for compositing."""
         S = self.img_size
-        img = Image.new("RGB", (S, S), (255, 255, 255))
+        img = Image.new("RGB", (S, S), bg_color)
         draw = ImageDraw.Draw(img)
+        lum = 0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]
+        text_color = (0, 0, 0) if lum > 128 else (255, 255, 255)
         words = sentence.split()
         font, lh, placements = self._fit(words)
         self.last_font = font
+        self.last_bg = bg_color
         boxes = []
         for w, x0, y0, x1, y1 in placements:
-            draw.text((x0, y0), w, fill=(0, 0, 0), font=font)
+            draw.text((x0, y0), w, fill=text_color, font=font)
             boxes.append((int(x0), int(y0), int(x1), int(y1)))
         return np.array(img), boxes
 
@@ -95,13 +98,13 @@ class TextRenderer:
         draw.text((x, y), text, fill=(0, 0, 0), font=font)
         return np.array(img)
 
-    def mask_words(self, img, boxes, indices):
+    def mask_words(self, img, boxes, indices, bg_color=(255, 255, 255)):
         """Erase selected words by filling their bboxes with the background."""
         pil = Image.fromarray(img.copy())
         d = ImageDraw.Draw(pil)
         for i in indices:
             x0, y0, x1, y1 = boxes[i]
-            d.rectangle([x0 - 1, y0 - 1, x1 + 1, y1 + 1], fill=(255, 255, 255))
+            d.rectangle([x0 - 1, y0 - 1, x1 + 1, y1 + 1], fill=bg_color)
         return np.array(pil)
 
 
