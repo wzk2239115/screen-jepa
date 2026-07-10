@@ -63,12 +63,14 @@ class TextRenderer:
         return best_font, best_lh, best_pl
 
     def render(self, sentence):
-        """Return (img: HxWx3 uint8, word_boxes: list[(x0,y0,x1,y1)])."""
+        """Return (img: HxWx3 uint8, word_boxes: list[(x0,y0,x1,y1)]).
+        Also stores self.last_font / self.last_font_size for compositing."""
         S = self.img_size
         img = Image.new("RGB", (S, S), (255, 255, 255))
         draw = ImageDraw.Draw(img)
         words = sentence.split()
         font, lh, placements = self._fit(words)
+        self.last_font = font
         boxes = []
         for w, x0, y0, x1, y1 in placements:
             draw.text((x0, y0), w, fill=(0, 0, 0), font=font)
