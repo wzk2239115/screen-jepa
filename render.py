@@ -4,29 +4,25 @@ from PIL import Image, ImageDraw, ImageFont
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def geom_augment(img, bg_color=(255, 255, 255), max_angle=2.0, scale_lo=0.92,
-                 scale_hi=1.0, max_shear=1.0):
-    """Gentle scale (zoom-OUT only, creates margin) + small rotation + shear.
-    Zooming out first leaves a border so rotation does not clip text out."""
+def geom_augment(img, bg_color=(255, 255, 255), scale_lo=0.9, scale_hi=1.0,
+                 max_shear=1.0):
+    """Zoom-OUT only (never clips, leaves margin) + very gentle horizontal shear.
+    No rotation (text stays upright and fully inside the canvas)."""
     import random
 
     pil = Image.fromarray(img)
     S = pil.size[0]
-    # zoom out only -> paste centered on bg canvas (leaves margin)
     s = random.uniform(scale_lo, scale_hi)
     ns = max(8, int(round(S * s)))
     pil = pil.resize((ns, ns), Image.BICUBIC)
     canvas = Image.new("RGB", (S, S), bg_color)
     canvas.paste(pil, ((S - ns) // 2, (S - ns) // 2))
     pil = canvas
-    # tiny shear then small rotation, within the margin
     sh = random.uniform(-max_shear, max_shear)
     c = S / 2
     pil = pil.transform((S, S), Image.AFFINE,
                         (1, sh, -sh * c, 0, 1, 0), resample=Image.BICUBIC,
                         fillcolor=bg_color)
-    ang = random.uniform(-max_angle, max_angle)
-    pil = pil.rotate(ang, resample=Image.BICUBIC, fillcolor=bg_color)
     return np.array(pil)
 
 
