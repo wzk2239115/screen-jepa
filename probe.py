@@ -53,15 +53,15 @@ ANTONYMS = [
 
 @torch.no_grad()
 def encode_words(words, model, renderer, device, n_aug=4):
-    """Encode each unique word from n_aug random-jitter renders; average embeddings."""
+    """Encode each unique word from n_aug dense renders (word fills canvas,
+    matching training distribution); average embeddings."""
     uniq = sorted(set(words))
     emb = {}
     for w in uniq:
         xs = []
         for _ in range(n_aug):
-            # light jitter: random font size to average out rendering specifics
-            fs = np.random.randint(32, 52)
-            img = renderer.render_centered(w, font_size=fs)
+            # dense auto-fit render (same as training), single word fills canvas
+            img, _ = renderer.render(w)
             xs.append(to_tensor(img))
         x = torch.stack(xs).to(device)
         z = model.encode(x).float()
@@ -104,7 +104,8 @@ def main():
                          patch=ca.get("patch_size", 16), arch=ca.get("arch", "vit")).to(device)
     model.load_state_dict(ckpt["model"])
     model.eval()
-    renderer = TextRenderer(img_size=args.img_size, font_path=args.font_path)
+    renderer = TextRenderer(img_size=args.img_size, font_size=ca.get("font_size", 72),
+                            font_path=args.font_path)
 
     all_words = [w for pr in SYNONYMS + ANTONYMS for w in pr]
     emb = encode_words(all_words, model, renderer, device)
