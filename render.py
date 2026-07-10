@@ -22,10 +22,8 @@ def patchwork_bg(size, grids=(2, 4)):
     return np.array(img)
 
 
-def geom_augment(img, bg_color=(230, 230, 230), scale_lo=0.9, scale_hi=1.0,
-                 max_shear=1.0):
-    """Zoom-OUT only (never clips, leaves margin) + very gentle horizontal shear.
-    No rotation (text stays upright and fully inside the canvas)."""
+def geom_augment(img, bg_color=(230, 230, 230), scale_lo=0.9, scale_hi=1.0):
+    """Zoom-OUT only (never clips, leaves margin). No rotation, no shear."""
     import random
 
     pil = Image.fromarray(img)
@@ -35,13 +33,7 @@ def geom_augment(img, bg_color=(230, 230, 230), scale_lo=0.9, scale_hi=1.0,
     pil = pil.resize((ns, ns), Image.BICUBIC)
     canvas = Image.new("RGB", (S, S), bg_color)
     canvas.paste(pil, ((S - ns) // 2, (S - ns) // 2))
-    pil = canvas
-    sh = random.uniform(-max_shear, max_shear)
-    c = S / 2
-    pil = pil.transform((S, S), Image.AFFINE,
-                        (1, sh, -sh * c, 0, 1, 0), resample=Image.BICUBIC,
-                        fillcolor=bg_color)
-    return np.array(pil)
+    return np.array(canvas)
 
 
 

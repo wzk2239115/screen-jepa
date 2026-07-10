@@ -118,8 +118,8 @@ def to_tensor(a):
 
 
 GEOM_PRESETS = {
-    1: dict(scale_lo=0.92, scale_hi=1.0, max_shear=1.0),   # light (zoom-out only, no rotation)
-    2: dict(scale_lo=0.82, scale_hi=1.0, max_shear=2.5),   # medium
+    1: dict(scale_lo=0.92, scale_hi=1.0),   # light (zoom-out only)
+    2: dict(scale_lo=0.82, scale_hi=1.0),   # medium
 }
 
 
