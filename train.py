@@ -65,6 +65,8 @@ def build_args():
     p.add_argument("--grid", type=int, default=14)
     p.add_argument("--bg_augment", type=int, default=0,
                    help="vary background color between views (force text-focus)")
+    p.add_argument("--bg_block", type=int, default=0,
+                   help="patchwork 2x2/4x4 colored-block background")
     p.add_argument("--font_augment", type=int, default=0,
                    help="vary font between views (prevent shape memorization)")
     p.add_argument("--font_pool", default=None,
@@ -167,6 +169,7 @@ def main():
     full_ds = TextImageDataset(sents, args.img_size, args.font_size, args.mask_ratio,
                                grid=args.grid, return_cell_mask=is_pred,
                                bg_augment=bool(args.bg_augment),
+                               bg_block=bool(args.bg_block),
                                font_augment=bool(args.font_augment),
                                font_pool=args.font_pool,
                                geom_strength=args.geom_strength)

@@ -25,6 +25,7 @@ def main():
     p.add_argument("--font_size", type=int, default=72)
     p.add_argument("--mask_ratio", type=float, default=0.2)
     p.add_argument("--bg_augment", type=int, default=0)
+    p.add_argument("--bg_block", type=int, default=0)
     p.add_argument("--font_augment", type=int, default=0)
     p.add_argument("--geom_strength", type=int, default=0)
     p.add_argument("--n", type=int, default=8)
@@ -38,6 +39,7 @@ def main():
     ds = TextImageDataset(sents, img_size=args.img_size,
                           font_size=args.font_size, mask_ratio=args.mask_ratio,
                           bg_augment=bool(args.bg_augment),
+                          bg_block=bool(args.bg_block),
                           font_augment=bool(args.font_augment),
                           geom_strength=args.geom_strength)
 

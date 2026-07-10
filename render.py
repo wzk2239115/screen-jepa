@@ -1,10 +1,28 @@
+import random
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
-def geom_augment(img, bg_color=(255, 255, 255), scale_lo=0.9, scale_hi=1.0,
+def _light():
+    return tuple(random.randint(150, 256) for _ in range(3))
+
+
+def patchwork_bg(size, grids=(2, 4)):
+    """Random grid (2x2 or 4x4) of light-colored blocks as a background."""
+    g = random.choice(grids)
+    img = Image.new("RGB", (size, size), (255, 255, 255))
+    d = ImageDraw.Draw(img)
+    cell = size / g
+    for i in range(g):
+        for j in range(g):
+            d.rectangle([j * cell, i * cell, (j + 1) * cell, (i + 1) * cell], fill=_light())
+    return np.array(img)
+
+
+def geom_augment(img, bg_color=(230, 230, 230), scale_lo=0.9, scale_hi=1.0,
                  max_shear=1.0):
     """Zoom-OUT only (never clips, leaves margin) + very gentle horizontal shear.
     No rotation (text stays upright and fully inside the canvas)."""
@@ -85,18 +103,21 @@ class TextRenderer:
             best_font = font
         return best_font, best_lh, best_pl
 
-    def render(self, sentence, bg_color=(255, 255, 255)):
-        """Return (img: HxWx3 uint8, word_boxes). bg_color sets background;
-        text color auto-contrasts. Stores self.last_font for compositing."""
+    def render(self, sentence, bg_color=(255, 255, 255), bg_img=None):
+        """Return (img, word_boxes). Background is bg_img (HxWx3 uint8) if given,
+        else solid bg_color. Text color auto-contrasts."""
         S = self.img_size
-        img = Image.new("RGB", (S, S), bg_color)
+        if bg_img is not None:
+            img = Image.fromarray(bg_img.astype(np.uint8).copy())
+            lum = float(np.array(bg_img).mean())
+        else:
+            img = Image.new("RGB", (S, S), bg_color)
+            lum = 0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]
         draw = ImageDraw.Draw(img)
-        lum = 0.299 * bg_color[0] + 0.587 * bg_color[1] + 0.114 * bg_color[2]
         text_color = (0, 0, 0) if lum > 128 else (255, 255, 255)
         words = sentence.split()
         font, lh, placements = self._fit(words)
         self.last_font = font
-        self.last_bg = bg_color
         boxes = []
         for w, x0, y0, x1, y1 in placements:
             draw.text((x0, y0), w, fill=text_color, font=font)
@@ -121,13 +142,20 @@ class TextRenderer:
         draw.text((x, y), text, fill=(0, 0, 0), font=font)
         return np.array(img)
 
-    def mask_words(self, img, boxes, indices, bg_color=(255, 255, 255)):
-        """Erase selected words by filling their bboxes with the background."""
+    def mask_words(self, img, boxes, indices, bg_color=(255, 255, 255), bg_img=None):
+        """Erase selected words: paste the bg_img region (if given) or fill bg_color."""
         pil = Image.fromarray(img.copy())
         d = ImageDraw.Draw(pil)
+        bgpil = Image.fromarray(bg_img.astype(np.uint8)) if bg_img is not None else None
+        S = pil.size[0]
         for i in indices:
             x0, y0, x1, y1 = boxes[i]
-            d.rectangle([x0 - 1, y0 - 1, x1 + 1, y1 + 1], fill=bg_color)
+            x0, y0 = max(0, x0 - 1), max(0, y0 - 1)
+            x1, y1 = min(S, x1 + 1), min(S, y1 + 1)
+            if bgpil is not None:
+                pil.paste(bgpil.crop((x0, y0, x1, y1)), (x0, y0))
+            else:
+                d.rectangle([x0, y0, x1, y1], fill=bg_color)
         return np.array(pil)
 
 

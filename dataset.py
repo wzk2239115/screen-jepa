@@ -5,7 +5,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from render import DEFAULT_FONT, TextRenderer, geom_augment
+from render import DEFAULT_FONT, TextRenderer, geom_augment, patchwork_bg
 
 DEFAULT_PARQUET = "/home/wzk/projects/screen-jepa/data/common_corpus_sample/common_corpus_1/subset_100_1.parquet"
 
@@ -131,13 +131,14 @@ class TextImageDataset(Dataset):
 
     def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15,
                  mask_min=1, grid=14, return_cell_mask=False, bg_augment=False,
-                 font_augment=False, font_pool=None, geom_strength=0):
+                 font_augment=False, font_pool=None, geom_strength=0, bg_block=False):
         self.sents = sentences
         self.mask_ratio = mask_ratio
         self.mask_min = mask_min
         self.grid = grid
         self.return_cell_mask = return_cell_mask
         self.bg_augment = bg_augment
+        self.bg_block = bg_block
         self.font_augment = font_augment
         self.geom_strength = geom_strength
         self.stride = img_size / grid
@@ -185,11 +186,16 @@ class TextImageDataset(Dataset):
         k = max(self.mask_min, int(round(n * self.mask_ratio)))
         k = min(k, n)
         idx = np.random.choice(n, size=k, replace=False)
-        if self.bg_augment or self.font_augment or self.geom_strength:
+        if self.bg_augment or self.bg_block or self.font_augment or self.geom_strength:
             r2 = self._pick()
-            bg = self._rand_bg() if self.bg_augment else (255, 255, 255)
-            alt, boxes2 = r2.render(sent, bg_color=bg)
-            masked = r2.mask_words(alt, boxes2, idx, bg_color=bg)
+            if self.bg_block:
+                bg_img = patchwork_bg(S)
+                bg = (230, 230, 230)
+            else:
+                bg_img = None
+                bg = self._rand_bg() if self.bg_augment else (255, 255, 255)
+            alt, boxes2 = r2.render(sent, bg_color=bg, bg_img=bg_img)
+            masked = r2.mask_words(alt, boxes2, idx, bg_color=bg, bg_img=bg_img)
             if self.geom_strength:
                 masked = geom_augment(masked, bg_color=bg, **GEOM_PRESETS[self.geom_strength])
             cell_boxes = boxes2
