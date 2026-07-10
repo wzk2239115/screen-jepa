@@ -25,6 +25,8 @@ def main():
     p.add_argument("--font_size", type=int, default=72)
     p.add_argument("--mask_ratio", type=float, default=0.2)
     p.add_argument("--bg_augment", type=int, default=0)
+    p.add_argument("--font_augment", type=int, default=0)
+    p.add_argument("--geom_augment", type=int, default=0)
     p.add_argument("--n", type=int, default=8)
     p.add_argument("--out", default="preview.png")
     args = p.parse_args()
@@ -35,7 +37,9 @@ def main():
     sents = sents[: args.n] if len(sents) >= args.n else sents
     ds = TextImageDataset(sents, img_size=args.img_size,
                           font_size=args.font_size, mask_ratio=args.mask_ratio,
-                          bg_augment=bool(args.bg_augment))
+                          bg_augment=bool(args.bg_augment),
+                          font_augment=bool(args.font_augment),
+                          geom_augment=bool(args.geom_augment))
 
     S = args.img_size
     pad = 4

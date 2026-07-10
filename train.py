@@ -65,6 +65,12 @@ def build_args():
     p.add_argument("--grid", type=int, default=14)
     p.add_argument("--bg_augment", type=int, default=0,
                    help="vary background color between views (force text-focus)")
+    p.add_argument("--font_augment", type=int, default=0,
+                   help="vary font between views (prevent shape memorization)")
+    p.add_argument("--font_pool", default=None,
+                   help="comma-separated .ttf paths for font augmentation")
+    p.add_argument("--geom_augment", type=int, default=0,
+                   help="random scale+rotation+shear on the augmented view")
     return p.parse_args()
 
 
@@ -160,7 +166,10 @@ def main():
     is_pred = args.objective == "predictive"
     full_ds = TextImageDataset(sents, args.img_size, args.font_size, args.mask_ratio,
                                grid=args.grid, return_cell_mask=is_pred,
-                               bg_augment=bool(args.bg_augment))
+                               bg_augment=bool(args.bg_augment),
+                               font_augment=bool(args.font_augment),
+                               font_pool=args.font_pool,
+                               geom_augment=bool(args.geom_augment))
     train_ds, val_ds = random_split(full_ds, [n_train, n_val], generator=g)
 
     if world > 1:

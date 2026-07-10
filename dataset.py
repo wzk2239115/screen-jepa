@@ -1,12 +1,23 @@
+import os
 import re
 
 import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from render import TextRenderer
+from render import DEFAULT_FONT, TextRenderer, geom_augment
 
 DEFAULT_PARQUET = "/home/wzk/projects/screen-jepa/data/common_corpus_sample/common_corpus_1/subset_100_1.parquet"
+
+DEFAULT_FONTS = [
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
+    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+]
 
 
 def _filter_sentence(c, min_words, max_words, ascii_only):
@@ -113,19 +124,30 @@ class TextImageDataset(Dataset):
     inside masked words' bboxes; used by the predictive JEPA objective."""
 
     def __init__(self, sentences, img_size=224, font_size=16, mask_ratio=0.15,
-                 mask_min=1, grid=14, return_cell_mask=False, bg_augment=False):
+                 mask_min=1, grid=14, return_cell_mask=False, bg_augment=False,
+                 font_augment=False, font_pool=None, geom_augment=False):
         self.sents = sentences
-        self.r = TextRenderer(img_size=img_size, font_size=font_size)
         self.mask_ratio = mask_ratio
         self.mask_min = mask_min
         self.grid = grid
         self.return_cell_mask = return_cell_mask
         self.bg_augment = bg_augment
+        self.font_augment = font_augment
+        self.do_geom = geom_augment
         self.stride = img_size / grid
+        pool = (font_pool.split(",") if font_pool else DEFAULT_FONTS)
+        pool = [p for p in pool if os.path.exists(p)] or [DEFAULT_FONT]
+        self.font_pool = pool if font_augment else [DEFAULT_FONT]
+        self.renderers = [TextRenderer(img_size=img_size, font_size=font_size, font_path=p)
+                          for p in self.font_pool]
+        self.r = self.renderers[0]
 
     @staticmethod
     def _rand_bg():
         return tuple(int(np.random.randint(150, 256)) for _ in range(3))
+
+    def _pick(self):
+        return self.renderers[np.random.randint(len(self.renderers))]
 
     def __len__(self):
         return len(self.sents)
@@ -143,8 +165,10 @@ class TextImageDataset(Dataset):
         return cm.flatten()
 
     def __getitem__(self, i):
-        full, boxes = self.r.render(self.sents[i])
-        S = self.r.img_size
+        sent = self.sents[i]
+        r1 = self._pick()
+        full, boxes = r1.render(sent)
+        S = r1.img_size
         n = len(boxes)
         if n == 0:
             full = np.full((S, S, 3), 255, dtype=np.uint8)
@@ -155,15 +179,20 @@ class TextImageDataset(Dataset):
         k = max(self.mask_min, int(round(n * self.mask_ratio)))
         k = min(k, n)
         idx = np.random.choice(n, size=k, replace=False)
-        if self.bg_augment:
-            bg = self._rand_bg()
-            alt, _ = self.r.render(self.sents[i], bg_color=bg)
-            masked = self.r.mask_words(alt, boxes, idx, bg_color=bg)
+        if self.bg_augment or self.font_augment or self.do_geom:
+            r2 = self._pick()
+            bg = self._rand_bg() if self.bg_augment else (255, 255, 255)
+            alt, boxes2 = r2.render(sent, bg_color=bg)
+            masked = r2.mask_words(alt, boxes2, idx, bg_color=bg)
+            if self.do_geom:
+                masked = geom_augment(masked, bg_color=bg)
+            cell_boxes = boxes2
         else:
-            masked = self.r.mask_words(full, boxes, idx)
+            masked = r1.mask_words(full, boxes, idx)
+            cell_boxes = boxes
         full_t, masked_t = to_tensor(full), to_tensor(masked)
         if self.return_cell_mask:
-            return full_t, masked_t, self._cell_mask(boxes, idx, S)
+            return full_t, masked_t, self._cell_mask(cell_boxes, idx, S)
         return full_t, masked_t
 
 

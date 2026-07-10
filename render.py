@@ -4,6 +4,37 @@ from PIL import Image, ImageDraw, ImageFont
 DEFAULT_FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf"
 
 
+def geom_augment(img, bg_color=(255, 255, 255), max_angle=10, scale_lo=0.88,
+                 scale_hi=1.15, max_shear=6):
+    """Random scale + rotation + shear on an HxWx3 uint8 image, filling exposed
+    corners with bg_color. Prevents the model from keying on exact glyph layout."""
+    import random
+
+    pil = Image.fromarray(img)
+    S = pil.size[0]
+    # scale (zoom in/out then center crop/pad back)
+    s = random.uniform(scale_lo, scale_hi)
+    ns = max(8, int(round(S * s)))
+    pil = pil.resize((ns, ns), Image.BICUBIC)
+    if ns >= S:
+        off = (ns - S) // 2
+        pil = pil.crop((off, off, off + S, off + S))
+    else:
+        canvas = Image.new("RGB", (S, S), bg_color)
+        canvas.paste(pil, ((S - ns) // 2, (S - ns) // 2))
+        pil = canvas
+    # shear (horizontal tilt) via affine, then rotation
+    sh = random.uniform(-max_shear, max_shear)
+    cx = cy = S / 2
+    pil = pil.transform((S, S), Image.AFFINE,
+                        (1, sh, -sh * cy, 0, 1, 0), resample=Image.BICUBIC,
+                        fillcolor=bg_color)
+    ang = random.uniform(-max_angle, max_angle)
+    pil = pil.rotate(ang, resample=Image.BICUBIC, fillcolor=bg_color)
+    return np.array(pil)
+
+
+
 def _layout(words, font, line_h, space_w, S, margin):
     """Greedy word-wrap. Returns (placements, fits).
     placements: list of (word, x0, y0, x1, y1). fits: all words placed inside canvas."""
