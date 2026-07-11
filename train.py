@@ -62,6 +62,10 @@ def build_args():
     p.add_argument("--pred_depth", type=int, default=4)
     p.add_argument("--ema_tau", type=float, default=0.996)
     p.add_argument("--target_mode", default="ema", choices=["ema", "stopgrad"])
+    p.add_argument("--init_from", default=None,
+                   help="Stage-2: load a Stage-1 encoder checkpoint to initialize/freeze")
+    p.add_argument("--freeze_encoder", type=int, default=0,
+                   help="Stage-2: freeze the encoder, train only the predictor")
     p.add_argument("--grid", type=int, default=14)
     p.add_argument("--bg_augment", type=int, default=0,
                    help="vary background color between views (force text-focus)")
@@ -192,6 +196,12 @@ def main():
                                layers=args.layers, heads=args.heads, patch=args.patch_size,
                                pred_depth=args.pred_depth, ema_tau=args.ema_tau,
                                target_mode=args.target_mode).to(device)
+        if args.init_from:
+            model.init_from(args.init_from)
+            print(f"[stage2] loaded encoder from {args.init_from}", flush=True)
+        if args.freeze_encoder:
+            model.freeze_encoder()
+            print("[stage2] encoder frozen (training predictor only)", flush=True)
         ddp_kw = dict(device_ids=[local_rank], find_unused_parameters=True)
     else:
         model = TextJEPA(args.hidden, args.layers, args.heads, args.mlp_dim,

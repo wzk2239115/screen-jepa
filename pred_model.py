@@ -18,7 +18,20 @@ import torch.nn.functional as F
 from torch import nn
 
 from backbones import TransformerBlock, build_encoder
-from model import SIGReg
+
+
+def vicreg(z, gamma=1.0, eps=1e-4):
+    """VICReg variance + covariance regularizer on (B, D) features.
+    var: push per-dim cross-batch std toward gamma (prevents collapse).
+    cov: decorrelate dimensions off-diagonal."""
+    std = torch.sqrt(z.var(dim=0) + eps)
+    var_loss = F.relu(gamma - std).mean()
+    zc = z - z.mean(dim=0, keepdim=True)
+    B, D = zc.shape
+    cov = zc.t() @ zc / B
+    off = cov.pow(2).sum() - cov.diagonal().pow(2).sum()
+    cov_loss = off / D
+    return var_loss + cov_loss
 
 
 def _ema_update(encoder, target, tau):
@@ -30,7 +43,8 @@ def _ema_update(encoder, target, tau):
 class PredictiveJEPA(nn.Module):
 
     def __init__(self, arch="convnext", img_size=224, hidden=768, layers=12,
-                 heads=12, patch=16, pred_depth=4, ema_tau=0.996, lam_sig=0.0):
+                 heads=12, patch=16, pred_depth=4, ema_tau=0.996, lam_sig=0.0,
+                 var_gamma=1.0, target_mode="ema"):
         super().__init__()
         self.encoder = build_encoder(arch, img_size=img_size, dim=hidden,
                                      patch=patch, depth=layers, heads=heads)
@@ -39,6 +53,8 @@ class PredictiveJEPA(nn.Module):
         self.arch = arch
         self.ema_tau = ema_tau
         self.lam_sig = lam_sig
+        self.var_gamma = var_gamma
+        self.target_mode = target_mode
 
         self.pos = nn.Parameter(torch.zeros(1, self.grid * self.grid, self.feat_dim))
         self.mask_token = nn.Parameter(torch.zeros(1, 1, self.feat_dim))
@@ -52,7 +68,6 @@ class PredictiveJEPA(nn.Module):
         self.target_encoder = copy.deepcopy(self.encoder)
         for p in self.target_encoder.parameters():
             p.requires_grad_(False)
-        self._sig = SIGReg()
 
     def encode(self, x):
         """Global embedding for eval/probe: mean of the trained stage features."""
@@ -65,12 +80,28 @@ class PredictiveJEPA(nn.Module):
         return h.unsqueeze(1).expand(-1, self.grid * self.grid, -1)
 
     def update_ema(self):
-        _ema_update(self.encoder, self.target_encoder, self.ema_tau)
+        if self.target_mode == "ema":
+            _ema_update(self.encoder, self.target_encoder, self.ema_tau)
+
+    def init_from(self, ckpt_path):
+        """Load a Stage-1 (invariance) encoder into self.encoder + target_encoder."""
+        ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+        sd = ck["model"]
+        enc = {k[len("encoder."):]: v for k, v in sd.items() if k.startswith("encoder.")}
+        self.encoder.load_state_dict(enc, strict=False)
+        self.target_encoder.load_state_dict(enc, strict=False)
+
+    def freeze_encoder(self):
+        for p in self.encoder.parameters():
+            p.requires_grad_(False)
 
     def forward(self, full, masked, cell_mask, lam=None):
         lam = self.lam_sig if lam is None else lam
-        with torch.no_grad():
-            tgt = self.target_encoder(full, return_map=True).detach()
+        if self.target_mode == "ema":
+            with torch.no_grad():
+                tgt = self.target_encoder(full, return_map=True).detach()
+        else:
+            tgt = self.encoder(full, return_map=True).detach()
         ctx = self.encoder(masked, return_map=True)
         B, N, D = ctx.shape
         inp = ctx + self.pos
@@ -90,8 +121,9 @@ class PredictiveJEPA(nn.Module):
             "mask_frac": cell_mask.float().mean().detach(),
         }
         if lam > 0:
-            reg = self._sig(ctx.to(self._sig.t.device).transpose(0, 1))
+            reg = vicreg(ctx.mean(dim=1), gamma=self.var_gamma)
             stats["reg"] = reg.detach()
+            stats["var_std"] = ctx.mean(dim=1).std(dim=0).mean().detach()
             return pred_loss + lam * reg, stats
         return pred_loss, stats
 
