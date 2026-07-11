@@ -219,7 +219,7 @@ def main():
         if is_main:
             print(f"[stage3] loaded encoder from {args.init_from} (unfrozen)", flush=True)
     if world > 1:
-        model = DDP(model, device_ids=[local_rank])
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     base = model.module if isinstance(model, DDP) else model
     if is_main:
         print(f"[model] trainable params(M)={sum(p.numel() for p in model.parameters() if p.requires_grad)/1e6:.1f}", flush=True)
