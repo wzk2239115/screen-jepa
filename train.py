@@ -62,6 +62,8 @@ def build_args():
     p.add_argument("--pred_depth", type=int, default=4)
     p.add_argument("--ema_tau", type=float, default=0.996)
     p.add_argument("--target_mode", default="ema", choices=["ema", "stopgrad"])
+    p.add_argument("--loss_mode", default="mse", choices=["mse", "contrastive"])
+    p.add_argument("--tau", type=float, default=0.2)
     p.add_argument("--init_from", default=None,
                    help="Stage-2: load a Stage-1 encoder checkpoint to initialize/freeze")
     p.add_argument("--freeze_encoder", type=int, default=0,
@@ -102,7 +104,7 @@ def lr_lambda(step, total, warmup):
 
 
 @torch.no_grad()
-def evaluate(base, loader, device, amp, is_pred=False):
+def evaluate(base, loader, device, amp, is_pred=False, loss_mode="mse", tau=0.2):
     base.eval()
     loss_sum, n = 0.0, 0
     Fs, Ms = [], []
@@ -116,7 +118,7 @@ def evaluate(base, loader, device, amp, is_pred=False):
         masked = masked.to(device, non_blocking=True)
         with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
             if is_pred:
-                loss, _ = base(full, masked, cell_mask)
+                loss, _ = base(full, masked, cell_mask, loss_mode=loss_mode, tau=tau)
                 loss_sum += float(loss) * full.size(0)
             zf = base.encode(full).float()
             zm = base.encode(masked).float()
@@ -252,7 +254,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 if is_pred:
-                    loss, stats = model(full, masked, cell_mask, lam=args.lam)
+                    loss, stats = model(full, masked, cell_mask, lam=args.lam,
+                                        loss_mode=args.loss_mode, tau=args.tau)
                 else:
                     loss, stats = model(full, masked, lam=args.lam)
             loss.backward()
@@ -270,9 +273,12 @@ def main():
                     zstd = zf.std(dim=0).mean().item()
                     dead = (zf.std(dim=0) < 1e-2).float().mean().item()
                 key = "pred" if is_pred else "inv"
-                bar.set_postfix(loss=f"{loss.item():.4f}", **{key: f"{float(stats[key]):.4f}"},
-                                std=f"{zstd:.3f}", dead=f"{dead:.3f}",
-                                cos=f"{cos:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
+                postfix = dict(loss=f"{loss.item():.4f}", **{key: f"{float(stats[key]):.4f}"},
+                               std=f"{zstd:.3f}", dead=f"{dead:.3f}",
+                               cos=f"{cos:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
+                if "ncr_acc" in stats:
+                    postfix["ncr"] = f"{float(stats['ncr_acc']):.3f}"
+                bar.set_postfix(postfix)
                 regv = float(stats["reg"]) if "reg" in stats else 0.0
                 with csv_path.open("a", newline="") as f:
                     csv.writer(f).writerow([epoch, step, f"{loss.item():.5f}",
@@ -285,7 +291,9 @@ def main():
             step += 1
 
         if is_main:
-            v_loss, v_std, v_dead, v_same, v_diff = evaluate(base, val, device, amp, is_pred)
+            v_loss, v_std, v_dead, v_same, v_diff = evaluate(
+                base, val, device, amp, is_pred,
+                loss_mode=(args.loss_mode if is_pred else "mse"), tau=args.tau)
             print(f"== epoch {epoch} val: loss={v_loss:.4f} std={v_std:.3f} dead={v_dead:.3f} "
                   f"cos_same={v_same:.3f} cos_diff={v_diff:.3f} margin={v_same-v_diff:.3f} ==", flush=True)
             with val_csv_path.open("a", newline="") as f:

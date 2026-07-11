@@ -95,7 +95,7 @@ class PredictiveJEPA(nn.Module):
         for p in self.encoder.parameters():
             p.requires_grad_(False)
 
-    def forward(self, full, masked, cell_mask, lam=None):
+    def forward(self, full, masked, cell_mask, lam=None, loss_mode="mse", tau=0.2):
         lam = self.lam_sig if lam is None else lam
         if self.target_mode == "ema":
             with torch.no_grad():
@@ -112,6 +112,26 @@ class PredictiveJEPA(nn.Module):
         mask = cell_mask
         pred = out[mask]
         target = tgt[mask]
+
+        if loss_mode == "contrastive":
+            # InfoNCE: pred must be closer to its own target than to other
+            # masked words' targets in the batch -> forces committing to a
+            # specific word latent (no mean-hedging).
+            q = F.normalize(pred, dim=-1)
+            p = F.normalize(target, dim=-1)
+            logits = q @ p.t() / tau
+            labels = torch.arange(q.size(0), device=q.device)
+            loss = F.cross_entropy(logits, labels)
+            acc = (logits.argmax(dim=1) == labels).float().mean()
+            stats = {
+                "pred": loss.detach(),
+                "cos": F.cosine_similarity(pred, target, dim=-1).mean().detach(),
+                "ncr_acc": acc.detach(),
+                "tgt_std": target.std(dim=0).mean().detach(),
+                "mask_frac": cell_mask.float().mean().detach(),
+            }
+            return loss, stats
+
         pred_loss = F.mse_loss(pred, target)
 
         stats = {
