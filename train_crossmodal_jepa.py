@@ -31,7 +31,7 @@ from tqdm import tqdm
 from render import DEFAULT_FONT
 from backbones import build_encoder, TransformerBlock
 from train import setup_ddp, lr_lambda
-from pred_model import vicreg
+from model import SIGReg
 from probe import ANTONYMS, SYNONYMS
 
 W, H = 224, 112  # each half of the 224x224 composite
@@ -142,6 +142,7 @@ class CrossModalJEPA(nn.Module):
         self.pred_norm = nn.LayerNorm(self.feat_dim)
         self.target_encoder = self._copy(self.encoder)
         self.ema_tau = ema_tau
+        self.sigreg = SIGReg()
 
     @staticmethod
     def _copy(m):
@@ -185,7 +186,7 @@ class CrossModalJEPA(nn.Module):
         loss = F.mse_loss(pred_t, tgt_t) + F.mse_loss(pred_p, tgt_p)
         stats = {}
         if lam > 0:
-            reg = vicreg(ctx.mean(dim=1))
+            reg = self.sigreg(ctx.transpose(0, 1))  # (N, B, D) as lewm
             loss = loss + lam * reg
             stats["reg"] = reg.detach()
         with torch.no_grad():
