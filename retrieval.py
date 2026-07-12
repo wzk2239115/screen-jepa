@@ -85,8 +85,9 @@ def main():
                                pred_depth=ca.get("pred_depth", 4)).to(device)
     elif ca.get("objective") == "wordpred":
         from train_wordpred import WordPred
+        vsz = len(ckpt.get("vocab") or []) or ca.get("vocab_size", 10000)
         model = WordPred("convnext", args.img_size, ca["hidden"], ca["layers"], ca["heads"],
-                         ca.get("patch_size", 16), vocab_size=1).to(device)
+                         ca.get("patch_size", 16), vocab_size=vsz).to(device)
     else:
         model = TextJEPA(ca["hidden"], ca["layers"], ca["heads"], ca.get("mlp_dim", 3072),
                          img_size=args.img_size, embed_dim=ca.get("embed_dim", 0) or ca["hidden"],
