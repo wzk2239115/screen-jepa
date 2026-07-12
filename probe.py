@@ -104,11 +104,15 @@ def main():
                                hidden=ca["hidden"], layers=ca["layers"], heads=ca["heads"],
                                patch=ca.get("patch_size", 16),
                                pred_depth=ca.get("pred_depth", 4)).to(device)
+    elif ca.get("objective") == "wordpred":
+        from train_wordpred import WordPred
+        model = WordPred("convnext", args.img_size, ca["hidden"], ca["layers"], ca["heads"],
+                         ca.get("patch_size", 16), vocab_size=1).to(device)
     else:
         model = TextJEPA(ca["hidden"], ca["layers"], ca["heads"], ca.get("mlp_dim", 3072),
                          img_size=args.img_size, embed_dim=ca.get("embed_dim", 0) or ca["hidden"],
                          patch=ca.get("patch_size", 16), arch=ca.get("arch", "vit")).to(device)
-    model.load_state_dict(ckpt["model"])
+    model.load_state_dict(ckpt["model"], strict=False)
     model.eval()
     renderer = TextRenderer(img_size=args.img_size, font_size=ca.get("font_size", 72),
                             font_path=args.font_path)
