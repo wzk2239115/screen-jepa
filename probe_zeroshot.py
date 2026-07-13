@@ -71,6 +71,7 @@ def main():
     p.add_argument("--n_proto", type=int, default=500)
     p.add_argument("--n_test", type=int, default=300)
     p.add_argument("--min_count", type=int, default=5, help="min instances to build a word prototype")
+    p.add_argument("--blank_text", type=int, default=0, help="1=test with blank upper half (no caption leakage)")
     args = p.parse_args()
 
     device = "cuda"
@@ -136,7 +137,10 @@ def main():
     mrr_sum = 0.0
     for cap, img_bytes in test_samples:
         img = Image.open(io.BytesIO(img_bytes))
-        composite, _ = build_composite(cap, img)
+        if args.blank_text:
+            composite, _ = build_composite("", img)  # blank upper half — no leakage
+        else:
+            composite, _ = build_composite(cap, img)  # caption upper half — has leakage
         t = torch.from_numpy(composite).float().permute(2, 0, 1) / 255.0
         t = ((t - 0.5) / 0.5).unsqueeze(0).to(device)
         with torch.no_grad():
