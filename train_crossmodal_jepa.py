@@ -38,7 +38,8 @@ W, H = 224, 112  # each half of the 224x224 composite
 
 
 def render_caption_block(caption, ww=W, hh=H, font_path=DEFAULT_FONT):
-    """Render a caption auto-fit into a ww x hh white block (black text)."""
+    """Render a caption auto-fit into a ww x hh white block (black text).
+    Returns (img, boxes) where boxes is a list of (x0,y0,x1,y1) per word."""
     img = Image.new("RGB", (ww, hh), (255, 255, 255))
     draw = ImageDraw.Draw(img)
     words = caption.split()
@@ -49,7 +50,7 @@ def render_caption_block(caption, ww=W, hh=H, font_path=DEFAULT_FONT):
         font = ImageFont.truetype(font_path, mid)
         lh = int(round(mid * 1.25))
         sp = font.getlength(" ")
-        pl, y, x, ok = [], hh, ww, True
+        pl, y, x, ok = [], 0, 6, True
         usable_w, usable_h = ww - 6, hh - 4
         for w in words:
             wl = font.getlength(w)
@@ -64,16 +65,39 @@ def render_caption_block(caption, ww=W, hh=H, font_path=DEFAULT_FONT):
             hi = mid - 1
     if best_pl is None:
         best_font = ImageFont.truetype(font_path, best); best_pl = []
+    boxes = []
     for w, x, y, x1, y1 in best_pl:
         draw.text((x, y), w, fill=(0, 0, 0), font=best_font)
-    return np.array(img)
+        boxes.append((int(x), int(y), int(x1), int(y1)))
+    return np.array(img), boxes
 
 
 def build_composite(caption, photo_pil, font_path=DEFAULT_FONT):
-    text_block = render_caption_block(caption, font_path=font_path)
+    text_block, boxes = render_caption_block(caption, font_path=font_path)
     photo = photo_pil.convert("RGB").resize((W, H))
     composite = np.concatenate([text_block, np.array(photo)], axis=0)  # 224x224
-    return composite
+    return composite, boxes
+
+
+def boxes_to_cell_masks(boxes, grid, patch_size):
+    """Convert per-word pixel bboxes to per-word cell masks (grid*grid bool each).
+    Bbox coords are in the 224x224 composite frame (text occupies top half)."""
+    g, ps, N = grid, patch_size, grid * grid
+    if not boxes:
+        m = torch.zeros(N, dtype=torch.bool)
+        m[: g * (g // 2)] = True
+        return m.unsqueeze(0)
+    masks = []
+    for x0, y0, x1, y1 in boxes:
+        r0 = max(0, y0 // ps); r1 = min(g - 1, max(r0, (y1 - 1) // ps))
+        c0 = max(0, x0 // ps); c1 = min(g - 1, max(c0, (x1 - 1) // ps))
+        m = torch.zeros(N, dtype=torch.bool)
+        for rr in range(r0, r1 + 1):
+            base = rr * g
+            for cc in range(c0, c1 + 1):
+                m[base + cc] = True
+        masks.append(m)
+    return torch.stack(masks)
 
 
 _TAR_CACHE = {}
@@ -86,7 +110,8 @@ def _tar(path):
 
 
 class TarImageText(Dataset):
-    def __init__(self, tar_dir, num_tars=None, img_size=224, font_path=DEFAULT_FONT):
+    def __init__(self, tar_dir, num_tars=None, img_size=224, font_path=DEFAULT_FONT,
+                 grid=14, patch_size=16):
         tars = sorted([str(p) for p in Path(tar_dir).glob("*.tar")])
         if num_tars:
             tars = tars[:num_tars]
@@ -107,6 +132,8 @@ class TarImageText(Dataset):
                 print(f"[data] WARNING: skipping corrupt tar {tp}: {e}", flush=True)
         self.font_path = font_path
         self.img_size = img_size
+        self.grid = grid
+        self.patch_size = patch_size
         print(f"[data] indexed {len(self.index)} image-text pairs from {good_tars}/{len(tars)} tars", flush=True)
 
     def __len__(self):
@@ -119,14 +146,35 @@ class TarImageText(Dataset):
                 tf = _tar(tp)
                 img = Image.open(io.BytesIO(tf.extractfile(name).read()))
                 cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
-                composite = build_composite(cap, img, self.font_path)
+                composite, boxes = build_composite(cap, img, self.font_path)
                 t = torch.from_numpy(composite).float().permute(2, 0, 1) / 255.0
-                return (t - 0.5) / 0.5
+                masks = boxes_to_cell_masks(boxes, self.grid, self.patch_size)
+                return (t - 0.5) / 0.5, masks, masks.size(0)
             except Exception:
                 continue
         # all retries failed: return a blank
         t = torch.zeros(3, 224, 224)
-        return t
+        m = torch.zeros(self.grid * self.grid, dtype=torch.bool).unsqueeze(0)
+        return t, m, 1
+
+
+def make_collate(grid):
+    """Collate variable-length word masks into padded (B, max_w, N) tensors."""
+    N = grid * grid
+
+    def collate(batch):
+        imgs = torch.stack([b[0] for b in batch])
+        max_w = max(b[2] for b in batch)
+        B = len(batch)
+        M = torch.zeros(B, max_w, N, dtype=torch.bool)
+        valid = torch.zeros(B, max_w, dtype=torch.bool)
+        for bi, b in enumerate(batch):
+            n = b[2]
+            M[bi, :n] = b[1]
+            valid[bi, :n] = True
+        return imgs, M, valid
+
+    return collate
 
 
 def region_mask(grid, rows):
@@ -156,6 +204,7 @@ class CrossModalJEPA(nn.Module):
         self.target_encoder = self._copy(self.encoder)
         self.ema_tau = ema_tau
         self.sigreg = SIGReg()
+        self.logit_scale = nn.Parameter(torch.tensor(np.log(1.0 / 0.07)))
 
     @staticmethod
     def _copy(m):
@@ -180,7 +229,7 @@ class CrossModalJEPA(nn.Module):
     def encode(self, x):
         return self.encoder(x, return_map=True).mean(dim=1)
 
-    def forward(self, composite, text_cells, photo_cells, lam=0.0):
+    def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0):
         with torch.no_grad():
             tgt = self.target_encoder(composite, return_map=True).detach()
         ctx = self.encoder(composite, return_map=True)
@@ -196,8 +245,28 @@ class CrossModalJEPA(nn.Module):
 
         pred_t, tgt_t = predict_region(self.text_cells.to(ctx.device))
         pred_p, tgt_p = predict_region(self.photo_cells.to(ctx.device))
-        loss = F.mse_loss(pred_t, tgt_t) + F.mse_loss(pred_p, tgt_p)
+        mse_loss = F.mse_loss(pred_t, tgt_t) + F.mse_loss(pred_p, tgt_p)
+        loss = w_mse * mse_loss
         stats = {}
+
+        # word-level CLIP alignment: each word feat <-> own photo feat (InfoNCE in batch)
+        if w_clip > 0 and word_masks is not None:
+            wm = word_masks.to(ctx.device).float()  # (B, max_w, N)
+            wv = word_valid.to(ctx.device).float()  # (B, max_w)
+            word_feats = torch.einsum("bwn,bnd->bwd", wm, ctx.float())  # (B, max_w, D)
+            denom = wm.sum(dim=2).clamp(min=1).unsqueeze(-1)
+            word_feats = F.normalize(word_feats / denom, dim=-1)
+            photo_idx = self.photo_cells.to(ctx.device)
+            photo_global = F.normalize(ctx[:, photo_idx].mean(dim=1), dim=-1)  # (B, D)
+            logit_scale = self.logit_scale.exp().clamp(max=100.0)
+            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_global) * logit_scale  # (B, max_w, B)
+            Bm, max_w, _ = sim.shape
+            labels = torch.arange(Bm, device=ctx.device).unsqueeze(1).expand(Bm, max_w)
+            ce = F.cross_entropy(sim.reshape(Bm * max_w, Bm), labels.reshape(Bm * max_w), reduction="none")
+            clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
+            stats["clip"] = clip_loss.detach()
+            loss = loss + w_clip * clip_loss
+
         if lam > 0:
             reg = self.sigreg(ctx.transpose(0, 1))  # (N, B, D) as lewm
             loss = loss + lam * reg
@@ -221,6 +290,8 @@ def build_args():
     p.add_argument("--pred_depth", type=int, default=4)
     p.add_argument("--ema_tau", type=float, default=0.996)
     p.add_argument("--lam", type=float, default=0.1, help="VICReg anti-collapse weight")
+    p.add_argument("--w_mse", type=float, default=0.3, help="weight on latent-prediction MSE")
+    p.add_argument("--w_clip", type=float, default=1.0, help="weight on word-level CLIP InfoNCE")
     p.add_argument("--batch", type=int, default=128)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--wd", type=float, default=1e-3)
@@ -282,14 +353,19 @@ def main():
         out = Path(args.out); out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed); random.seed(args.seed); np.random.seed(args.seed)
 
-    ds = TarImageText(args.tar_dir, args.num_tars, args.img_size)
+    grid = args.img_size // args.patch_size
+    ds = TarImageText(args.tar_dir, args.num_tars, args.img_size,
+                      grid=grid, patch_size=args.patch_size)
+    collate = make_collate(grid)
     if world > 1:
         sampler = DistributedSampler(ds, shuffle=True, drop_last=True)
         train = DataLoader(ds, batch_size=args.batch, sampler=sampler, num_workers=args.workers,
-                           drop_last=True, persistent_workers=args.workers > 0, pin_memory=True)
+                           drop_last=True, persistent_workers=args.workers > 0, pin_memory=True,
+                           collate_fn=collate)
     else:
         train = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers,
-                           drop_last=True, persistent_workers=args.workers > 0, pin_memory=True)
+                           drop_last=True, persistent_workers=args.workers > 0, pin_memory=True,
+                           collate_fn=collate)
 
     model = CrossModalJEPA("convnext", args.img_size, args.hidden, args.layers, args.heads,
                            args.patch_size, args.pred_depth, args.ema_tau).to(device)
@@ -314,17 +390,22 @@ def main():
             sampler.set_epoch(epoch)
         model.train()
         bar = tqdm(train, desc=f"e{epoch}", disable=not is_main, dynamic_ncols=True, mininterval=2.0)
-        for composite in bar:
+        for composite, word_masks, word_valid in bar:
             composite = composite.to(device, non_blocking=True)
+            word_masks = word_masks.to(device, non_blocking=True)
+            word_valid = word_valid.to(device, non_blocking=True)
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
-                loss, stats = model(composite, None, None, lam=args.lam)
+                loss, stats = model(composite, word_masks, word_valid,
+                                    lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip)
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step(); sched.step()
             base.update_ema()
             if is_main and step % args.log_every == 0:
+                clip_val = float(stats.get("clip", torch.tensor(0.0)))
                 bar.set_postfix(loss=f"{loss.item():.4f}", cos=f"{float(stats['cos']):.3f}",
+                                clip=f"{clip_val:.3f}",
                                 lr=f"{sched.get_last_lr()[0]:.1e}")
             step += 1
         if is_main:
