@@ -93,27 +93,40 @@ class TarImageText(Dataset):
         self.index = []
         import json
         self.json = json
+        good_tars = 0
         for tp in tars:
-            tf = tarfile.open(tp)
-            for m in tf.getmembers():
-                if m.name.endswith(".jpg"):
-                    self.index.append((tp, m.name))
-            tf.close()
+            try:
+                tf = tarfile.open(tp)
+                members = tf.getmembers()
+                for m in members:
+                    if m.name.endswith(".jpg"):
+                        self.index.append((tp, m.name))
+                tf.close()
+                good_tars += 1
+            except Exception as e:
+                print(f"[data] WARNING: skipping corrupt tar {tp}: {e}", flush=True)
         self.font_path = font_path
         self.img_size = img_size
-        print(f"[data] indexed {len(self.index)} image-text pairs from {len(tars)} tars", flush=True)
+        print(f"[data] indexed {len(self.index)} image-text pairs from {good_tars}/{len(tars)} tars", flush=True)
 
     def __len__(self):
         return len(self.index)
 
     def __getitem__(self, i):
-        tp, name = self.index[random.randint(0, len(self.index) - 1)]
-        tf = _tar(tp)
-        img = Image.open(io.BytesIO(tf.extractfile(name).read()))
-        cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
-        composite = build_composite(cap, img, self.font_path)
-        t = torch.from_numpy(composite).float().permute(2, 0, 1) / 255.0
-        return (t - 0.5) / 0.5
+        for _ in range(5):
+            try:
+                tp, name = self.index[random.randint(0, len(self.index) - 1)]
+                tf = _tar(tp)
+                img = Image.open(io.BytesIO(tf.extractfile(name).read()))
+                cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+                composite = build_composite(cap, img, self.font_path)
+                t = torch.from_numpy(composite).float().permute(2, 0, 1) / 255.0
+                return (t - 0.5) / 0.5
+            except Exception:
+                continue
+        # all retries failed: return a blank
+        t = torch.zeros(3, 224, 224)
+        return t
 
 
 def region_mask(grid, rows):
