@@ -1,7 +1,6 @@
 import torch
 import torch.nn.functional as F
 from torch import nn
-from transformers import ViTConfig, ViTModel
 
 
 class SIGReg(nn.Module):
@@ -60,6 +59,7 @@ class TextJEPA(nn.Module):
         super().__init__()
         self.arch = arch.lower()
         if self.arch == "vit":
+            from transformers import ViTConfig, ViTModel
             cfg = ViTConfig(
                 hidden_size=hidden,
                 num_hidden_layers=layers,
