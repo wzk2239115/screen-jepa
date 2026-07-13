@@ -249,7 +249,7 @@ class CrossModalJEPA(nn.Module):
         loss = w_mse * mse_loss
         stats = {}
 
-        # word-level CLIP alignment: each word feat <-> own photo feat (InfoNCE in batch)
+        # word-level CLIP alignment: each word feat <-> own photo feat (InfoNCE)
         if w_clip > 0 and word_masks is not None:
             wm = word_masks.to(ctx.device).float()  # (B, max_w, N)
             wv = word_valid.to(ctx.device).float()  # (B, max_w)
@@ -258,11 +258,25 @@ class CrossModalJEPA(nn.Module):
             word_feats = F.normalize(word_feats / denom, dim=-1)
             photo_idx = self.photo_cells.to(ctx.device)
             photo_global = F.normalize(ctx[:, photo_idx].mean(dim=1), dim=-1)  # (B, D)
+
+            # gather photo_global across GPUs for larger negative pool
+            rank = 0
+            photo_all = photo_global
+            if dist.is_available() and dist.is_initialized():
+                world = dist.get_world_size()
+                if world > 1:
+                    gathered = [torch.zeros_like(photo_global) for _ in range(world)]
+                    dist.all_gather(gathered, photo_global.contiguous())
+                    rank = dist.get_rank()
+                    gathered[rank] = photo_global  # keep local gradient
+                    photo_all = torch.cat(gathered, dim=0)  # (world*B, D)
+
             logit_scale = self.logit_scale.exp().clamp(max=100.0)
-            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_global) * logit_scale  # (B, max_w, B)
-            Bm, max_w, _ = sim.shape
-            labels = torch.arange(Bm, device=ctx.device).unsqueeze(1).expand(Bm, max_w)
-            ce = F.cross_entropy(sim.reshape(Bm * max_w, Bm), labels.reshape(Bm * max_w), reduction="none")
+            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all) * logit_scale  # (B, max_w, world*B)
+            Bm, max_w, Nb = sim.shape
+            labels = torch.arange(Bm, device=ctx.device) + rank * Bm
+            labels = labels.unsqueeze(1).expand(Bm, max_w)
+            ce = F.cross_entropy(sim.reshape(Bm * max_w, Nb), labels.reshape(Bm * max_w), reduction="none")
             clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
             stats["clip"] = clip_loss.detach()
             loss = loss + w_clip * clip_loss
