@@ -292,7 +292,10 @@ def main():
         if world > 1:
             sampler.set_epoch(epoch)
         model.train()
-        bar = tqdm(train, desc=f"e{epoch}", disabled=not is_main, dynamic_ncols=True, mininterval=2.0)
+        if is_main:
+            bar = tqdm(train, desc=f"e{epoch}", dynamic_ncols=True, mininterval=2.0)
+        else:
+            bar = train
         for composite, word_masks, word_valid in bar:
             composite = composite.to(device, non_blocking=True)
             word_masks = word_masks.to(device, non_blocking=True)
