@@ -145,25 +145,23 @@ class CLIPModel(nn.Module):
         return self.encode_image(images), self.encode_text(tokens)
 
 
+def gather_with_grad(t, world):
+    """All-gather tensor across GPUs; local copy keeps gradient, others detached."""
+    if world <= 1:
+        return t
+    gathered = [torch.zeros_like(t) for _ in range(world)]
+    dist.all_gather(gathered, t.contiguous())
+    gathered[dist.get_rank()] = t
+    return torch.cat(gathered, dim=0)
+
+
 def clip_loss(img_feat, txt_feat, logit_scale, world=1):
-    """Symmetric InfoNCE with cross-GPU gather on text features."""
-    if world > 1:
-        gathered = [torch.zeros_like(txt_feat) for _ in range(world)]
-        dist.all_gather(gathered, txt_feat.contiguous())
-        rank = dist.get_rank()
-        gathered[rank] = txt_feat
-        txt_all = torch.cat(gathered, dim=0)
-    else:
-        txt_all = txt_feat
-
-    logits = img_feat @ txt_all.T * logit_scale  # (B, world*B)
-    B = img_feat.size(0)
-    if world > 1:
-        rank = dist.get_rank()
-        labels = torch.arange(B, device=img_feat.device) + rank * B
-    else:
-        labels = torch.arange(B, device=img_feat.device)
-
+    """Symmetric InfoNCE. Gather both image and text for full world*B x world*B matrix."""
+    img_all = gather_with_grad(img_feat, world)  # (world*B, D)
+    txt_all = gather_with_grad(txt_feat, world)  # (world*B, D)
+    logits = img_all @ txt_all.T * logit_scale   # (world*B, world*B)
+    N = img_all.size(0)
+    labels = torch.arange(N, device=img_feat.device)
     loss_i2t = F.cross_entropy(logits, labels)
     loss_t2i = F.cross_entropy(logits.T, labels)
     return (loss_i2t + loss_t2i) / 2
