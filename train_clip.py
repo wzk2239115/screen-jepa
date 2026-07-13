@@ -28,6 +28,8 @@ from backbones import build_encoder
 from train import setup_ddp, lr_lambda
 
 # === tokenizer ===
+import os as _os
+_os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")
 try:
     from transformers import CLIPTokenizerFast
     _tok = CLIPTokenizerFast.from_pretrained("openai/clip-vit-base-patch32")
@@ -35,9 +37,9 @@ try:
     BOS = _tok.bos_token_id      # <|startoftext|>
     EOS = _tok.eos_token_id      # <|endoftext|>
     PAD = _tok.pad_token_id or EOS
-    print(f"[clip] loaded CLIPTokenizer: vocab={VOCAB_SIZE} BOS={BOS} EOS={EOS}", flush=True)
+    print(f"[clip] loaded CLIPTokenizer via {_os.environ['HF_ENDPOINT']}: vocab={VOCAB_SIZE} BOS={BOS} EOS={EOS}", flush=True)
 except Exception as e:
-    raise RuntimeError(f"Cannot load CLIPTokenizer: {e}. Install transformers or provide offline files.")
+    raise RuntimeError(f"Cannot load CLIPTokenizer: {e}. Set HF_ENDPOINT or download manually: HF_ENDPOINT=https://hf-mirror.com hf download openai/clip-vit-base-patch32")
 
 
 def tokenize(text, max_len=77):
