@@ -317,6 +317,8 @@ def build_args():
     p.add_argument("--bf16", type=int, default=1)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--out", default="./outputs/xmodal")
+    p.add_argument("--save_every", type=int, default=50, help="save checkpoint every N epochs")
+    p.add_argument("--eval_every", type=int, default=10, help="semantic eval every N epochs")
     return p.parse_args()
 
 
@@ -423,12 +425,17 @@ def main():
                                 lr=f"{sched.get_last_lr()[0]:.1e}")
             step += 1
         if is_main:
-            syn, ant, rnd = semantic_eval(base, device, amp, args.img_size, base.grid, DEFAULT_FONT)
-            print(f"== epoch {epoch} semantic: syn={syn:.3f} ant={ant:.3f} random={rnd:.3f} "
-                  f"(syn-rand={syn-rnd:+.3f}, ant-rand={ant-rnd:+.3f}) ==", flush=True)
-            torch.save({"model": base.state_dict(),
-                        "args": {**vars(args), "arch": "convnext", "objective": "xmodal"}},
-                       out / f"epoch{epoch}.pt")
+            do_eval = (epoch % args.eval_every == 0) or (epoch == args.epochs - 1)
+            do_save = (epoch % args.save_every == 0) or (epoch == args.epochs - 1)
+            if do_eval:
+                syn, ant, rnd = semantic_eval(base, device, amp, args.img_size, base.grid, DEFAULT_FONT)
+                print(f"== epoch {epoch} semantic: syn={syn:.3f} ant={ant:.3f} random={rnd:.3f} "
+                      f"(syn-rand={syn-rnd:+.3f}, ant-rand={ant-rnd:+.3f}) ==", flush=True)
+            if do_save:
+                torch.save({"model": base.state_dict(),
+                            "args": {**vars(args), "arch": "convnext", "objective": "xmodal"}},
+                           out / f"epoch{epoch}.pt")
+                print(f"   [saved checkpoint at epoch {epoch}]", flush=True)
     if world > 1:
         dist.destroy_process_group()
 
