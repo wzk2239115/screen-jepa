@@ -354,6 +354,13 @@ def main():
     total_steps = args.epochs * len(train)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_lambda(s, total_steps, args.warmup))
 
+    # tensorboard
+    writer = None
+    if is_main:
+        from torch.utils.tensorboard import SummaryWriter
+        writer = SummaryWriter(out / "tb")
+        print(f"[tb] logs at {out}/tb — run: tensorboard --logdir {out}/tb", flush=True)
+
     step = 0
     for epoch in range(args.epochs):
         if world > 1:
@@ -375,11 +382,19 @@ def main():
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             opt.step(); sched.step()
             base.update_ema()
-            if is_main and step % args.log_every == 0:
-                clip_val = float(stats.get("clip", torch.tensor(0.0)))
-                bar.set_postfix(loss=f"{loss.item():.4f}", cos=f"{float(stats['cos']):.3f}",
-                                clip=f"{clip_val:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
-            step += 1
+            if is_main:
+                if step % args.log_every == 0:
+                    clip_val = float(stats.get("clip", torch.tensor(0.0)))
+                    bar.set_postfix(loss=f"{loss.item():.4f}", cos=f"{float(stats['cos']):.3f}",
+                                    clip=f"{clip_val:.3f}", lr=f"{sched.get_last_lr()[0]:.1e}")
+                    if writer:
+                        writer.add_scalar("train/loss", loss.item(), step)
+                        writer.add_scalar("train/clip", clip_val, step)
+                        writer.add_scalar("train/cos", float(stats["cos"]), step)
+                        writer.add_scalar("train/lr", sched.get_last_lr()[0], step)
+                        if "reg" in stats:
+                            writer.add_scalar("train/sigreg", float(stats["reg"]), step)
+                step += 1
         if is_main:
             do_eval = (epoch % args.eval_every == 0) or (epoch == args.epochs - 1)
             do_save = (epoch % args.save_every == 0) or (epoch == args.epochs - 1)
@@ -387,11 +402,19 @@ def main():
                 syn, ant, rnd = semantic_eval(base, device, amp, args.img_size, base.grid, DEFAULT_FONT)
                 print(f"== epoch {epoch} semantic: syn={syn:.3f} ant={ant:.3f} random={rnd:.3f} "
                       f"(syn-rand={syn-rnd:+.3f}, ant-rand={ant-rnd:+.3f}) ==", flush=True)
+                if writer:
+                    writer.add_scalar("eval/syn", syn, epoch)
+                    writer.add_scalar("eval/ant", ant, epoch)
+                    writer.add_scalar("eval/random", rnd, epoch)
+                    writer.add_scalar("eval/syn_minus_rand", syn - rnd, epoch)
+                    writer.add_scalar("eval/ant_minus_rand", ant - rnd, epoch)
             if do_save:
                 torch.save({"model": base.state_dict(),
                             "args": {**vars(args), "arch": "convnext", "objective": "ctm_jepa"}},
                            out / f"epoch{epoch}.pt")
                 print(f"   [saved checkpoint at epoch {epoch}]", flush=True)
+    if writer:
+        writer.close()
     if world > 1:
         dist.destroy_process_group()
 
