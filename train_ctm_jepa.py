@@ -83,8 +83,12 @@ class CTMPredictor(nn.Module):
         nn.init.normal_(self.mask_token, std=0.02)
         nn.init.trunc_normal_(self.pos, std=0.02)
 
-        # cross-attention
-        self.attention = nn.MultiheadAttention(dim, num_heads, batch_first=True)
+        # cross-attention (hand-written to avoid nn.MultiheadAttention CPU fallback)
+        self.num_heads = num_heads
+        self.q_proj = nn.Linear(dim, dim)
+        self.k_proj = nn.Linear(dim, dim)
+        self.v_proj = nn.Linear(dim, dim)
+        self.attn_out_proj = nn.Linear(dim, dim)
         self.norm1 = nn.LayerNorm(dim)
 
         # synapse: concat(attn_out, input) → new state
@@ -122,8 +126,18 @@ class CTMPredictor(nn.Module):
         trace = state.unsqueeze(-1).expand(B, N, D, M).contiguous()
 
         for _ in range(self.num_iters):
-            # 1. cross-attention
-            attn_out, _ = self.attention(state, x, x)
+            # 1. cross-attention (SDPA, GPU-friendly)
+            q = self.q_proj(state)
+            k = self.k_proj(x)
+            v = self.v_proj(x)
+            B_, N_, D_ = q.shape
+            hd = D_ // self.num_heads
+            qh = q.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
+            kh = k.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
+            vh = v.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
+            attn_out = F.scaled_dot_product_attention(qh, kh, vh)
+            attn_out = attn_out.transpose(1, 2).reshape(B_, N_, D_)
+            attn_out = self.attn_out_proj(attn_out)
             state = self.norm1(state + attn_out)
 
             # 2. synapse update (residual with original input)
