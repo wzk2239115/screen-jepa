@@ -27,6 +27,7 @@ import torch
 import torch.distributed as dist
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader, DistributedSampler
 from tqdm import tqdm
@@ -107,9 +108,36 @@ class CTMPredictor(nn.Module):
         self.out_norm = nn.LayerNorm(dim)
         self.out_proj = nn.Linear(dim, dim)
 
+    def _tick(self, state, x, trace):
+        """One CTM tick: attention → synapse → NLM. Pure function for checkpointing."""
+        # 1. cross-attention (SDPA, GPU-friendly)
+        q = self.q_proj(state)
+        k = self.k_proj(x)
+        v = self.v_proj(x)
+        B, N, D = q.shape
+        hd = D // self.num_heads
+        qh = q.reshape(B, N, self.num_heads, hd).transpose(1, 2)
+        kh = k.reshape(B, N, self.num_heads, hd).transpose(1, 2)
+        vh = v.reshape(B, N, self.num_heads, hd).transpose(1, 2)
+        attn_out = F.scaled_dot_product_attention(qh, kh, vh)
+        attn_out = attn_out.transpose(1, 2).reshape(B, N, D)
+        attn_out = self.attn_out_proj(attn_out)
+        state = self.norm1(state + attn_out)
+
+        # 2. synapse update
+        state = self.synapse(torch.cat([state, x], dim=-1))
+
+        # 3. slide memory trace
+        trace = torch.cat([trace[..., 1:], state.unsqueeze(-1)], dim=-1)
+
+        # 4. NLM: per-neuron processing
+        nlm_out = self.nlm(trace)
+        state = state + self.nlm_norm(nlm_out)
+        return state, trace
+
     def forward(self, feature_map, mask):
         """
-        feature_map: (B, N, D) — encoder output (already has pos added by caller)
+        feature_map: (B, N, D) — encoder output
         mask: (B, N) bool — True = masked cells (replaced with mask_token)
         Returns: (B, N, D) predicted latents for all cells
         """
@@ -126,29 +154,10 @@ class CTMPredictor(nn.Module):
         trace = state.unsqueeze(-1).expand(B, N, D, M).contiguous()
 
         for _ in range(self.num_iters):
-            # 1. cross-attention (SDPA, GPU-friendly)
-            q = self.q_proj(state)
-            k = self.k_proj(x)
-            v = self.v_proj(x)
-            B_, N_, D_ = q.shape
-            hd = D_ // self.num_heads
-            qh = q.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
-            kh = k.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
-            vh = v.reshape(B_, N_, self.num_heads, hd).transpose(1, 2)
-            attn_out = F.scaled_dot_product_attention(qh, kh, vh)
-            attn_out = attn_out.transpose(1, 2).reshape(B_, N_, D_)
-            attn_out = self.attn_out_proj(attn_out)
-            state = self.norm1(state + attn_out)
-
-            # 2. synapse update (residual with original input)
-            state = self.synapse(torch.cat([state, x], dim=-1))
-
-            # 3. slide memory trace
-            trace = torch.cat([trace[..., 1:], state.unsqueeze(-1)], dim=-1)
-
-            # 4. NLM: per-neuron processing
-            nlm_out = self.nlm(trace)  # (B, N, D)
-            state = state + self.nlm_norm(nlm_out)
+            if self.training:
+                state, trace = checkpoint(self._tick, state, x, trace, use_reentrant=False)
+            else:
+                state, trace = self._tick(state, x, trace)
 
         return self.out_proj(self.out_norm(state))
 
