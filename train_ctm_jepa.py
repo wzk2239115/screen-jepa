@@ -53,13 +53,13 @@ class SuperLinear(nn.Module):
         bound = 1.0 / math.sqrt(memory_length + 1)
         self.w = nn.Parameter(torch.empty(memory_length, 1, num_neurons).uniform_(-bound, bound))
         self.b = nn.Parameter(torch.zeros(1, num_neurons, 1))
-        self.scale = nn.Parameter(torch.Tensor([1.0]))
+        self.scale = nn.Parameter(torch.Tensor([0.0]))  # init 0: NLM starts inactive, learns gradually
 
     def forward(self, trace):
         # trace: (..., D, M) — each neuron's M-step history
         out = self.layernorm(trace)
         out = torch.einsum("...dm,mhd->...dh", out, self.w) + self.b  # (..., D, 1)
-        return out.squeeze(-1) * self.scale  # (..., D)
+        return torch.tanh(out.squeeze(-1)) * self.scale  # (..., D) — tanh bounds output
 
 
 class CTMPredictor(nn.Module):
@@ -296,11 +296,11 @@ def build_args():
     p.add_argument("--ctm_thoughts", type=int, default=8, help="number of thought tokens (K)")
     p.add_argument("--grad_checkpoint", type=int, default=1, help="gradient checkpointing (1=on for T>20)")
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=3e-4)
+    p.add_argument("--lr", type=float, default=2e-4)
     p.add_argument("--wd", type=float, default=1e-3)
     p.add_argument("--epochs", type=int, default=100)
-    p.add_argument("--warmup", type=float, default=0.03)
-    p.add_argument("--grad_clip", type=float, default=1.0)
+    p.add_argument("--warmup", type=float, default=0.05)
+    p.add_argument("--grad_clip", type=float, default=0.5)
     p.add_argument("--workers", type=int, default=8)
     p.add_argument("--log_every", type=int, default=100)
     p.add_argument("--bf16", type=int, default=1)
