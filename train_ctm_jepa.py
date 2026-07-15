@@ -77,7 +77,7 @@ class CTMPredictor(nn.Module):
     """
 
     def __init__(self, dim, num_tokens, num_iters=50, memory_length=4,
-                 num_thoughts=8, num_heads=4):
+                 num_thoughts=8, num_heads=4, bptt_window=15):
         super().__init__()
         self.dim = dim
         self.num_tokens = num_tokens
@@ -85,6 +85,7 @@ class CTMPredictor(nn.Module):
         self.num_iters = num_iters
         self.memory_length = memory_length
         self.num_heads = num_heads
+        self.bptt_window = bptt_window
         self.use_checkpoint = False
 
         # thought token init (K learnable tokens)
@@ -155,8 +156,11 @@ class CTMPredictor(nn.Module):
         thoughts = self.thought_init.expand(B, K, D)
         trace = thoughts.unsqueeze(-1).expand(B, K, D, M).contiguous()
 
-        # T ticks of iterative reasoning
-        for _ in range(self.num_iters):
+        # T ticks of iterative reasoning (truncated BPTT for stability)
+        for t in range(self.num_iters):
+            if t > 0 and t % self.bptt_window == 0:
+                thoughts = thoughts.detach()
+                trace = trace.detach()
             if self.training and self.use_checkpoint:
                 thoughts, trace = checkpoint(self._tick, thoughts, x, trace, use_reentrant=False)
             else:
@@ -294,6 +298,7 @@ def build_args():
     p.add_argument("--ctm_iters", type=int, default=50, help="CTM thinking ticks (T)")
     p.add_argument("--ctm_memory", type=int, default=4, help="CTM memory length (M)")
     p.add_argument("--ctm_thoughts", type=int, default=8, help="number of thought tokens (K)")
+    p.add_argument("--bptt_window", type=int, default=15, help="truncated BPTT window size")
     p.add_argument("--grad_checkpoint", type=int, default=1, help="gradient checkpointing (1=on for T>20)")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=2e-4)
@@ -340,6 +345,7 @@ def main():
                     args.patch_size, args.ema_tau, args.ctm_iters, args.ctm_memory,
                     args.ctm_thoughts).to(device)
     base = model.module if isinstance(model, DDP) else model
+    base.predictor.bptt_window = args.bptt_window
     base.predictor.use_checkpoint = bool(args.grad_checkpoint)
     if world > 1:
         model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
@@ -379,7 +385,12 @@ def main():
                 loss, stats = model(composite, word_masks, word_valid,
                                     lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
+            if torch.isnan(grad_norm) or torch.isinf(grad_norm):
+                if is_main:
+                    print(f"[WARN] NaN/Inf grad at step {step}, skipping update", flush=True)
+                opt.zero_grad(set_to_none=True)
+                continue
             opt.step(); sched.step()
             base.update_ema()
             if is_main:
