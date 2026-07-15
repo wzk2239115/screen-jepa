@@ -342,7 +342,7 @@ def main():
     base = model.module if isinstance(model, DDP) else model
     base.predictor.use_checkpoint = bool(args.grad_checkpoint)
     if world > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
     base = model.module if isinstance(model, DDP) else model
     if is_main:
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
