@@ -63,108 +63,123 @@ class SuperLinear(nn.Module):
 
 
 class CTMPredictor(nn.Module):
-    """CTM-style iterative predictor for JEPA.
+    """CTM predictor with K thought tokens (K << N cells).
 
-    Iterates T ticks over the feature map. Each tick:
-      1. Cross-attention between all cells
-      2. Synapse update (state + input → new state)
-      3. NLM processing (per-neuron memory → state update)
+    Thought tokens iteratively attend to feature map over T ticks,
+    then broadcast back to all N cells via output attention.
+    Per-tick cost: O(K*N*D) instead of O(N^2*D), enabling T=50+ ticks.
+
+    Each tick:
+      1. K thoughts cross-attend to N feature-map cells
+      2. Synapse update (thoughts + attn → new thoughts)
+      3. NLM (per-neuron memory processing)
+    Final: N cells cross-attend to K thoughts → predicted latents
     """
 
-    def __init__(self, dim, num_tokens, num_iters=10, memory_length=4, num_heads=4):
+    def __init__(self, dim, num_tokens, num_iters=50, memory_length=4,
+                 num_thoughts=8, num_heads=4):
         super().__init__()
         self.dim = dim
         self.num_tokens = num_tokens
+        self.num_thoughts = num_thoughts
         self.num_iters = num_iters
         self.memory_length = memory_length
+        self.num_heads = num_heads
+        self.use_checkpoint = False
 
-        # mask token + position
+        # thought token init (K learnable tokens)
+        self.thought_init = nn.Parameter(torch.zeros(1, num_thoughts, dim))
+        nn.init.normal_(self.thought_init, std=0.02)
+
+        # mask token + position for feature map
         self.mask_token = nn.Parameter(torch.zeros(1, 1, dim))
         self.pos = nn.Parameter(torch.zeros(1, num_tokens, dim))
         nn.init.normal_(self.mask_token, std=0.02)
         nn.init.trunc_normal_(self.pos, std=0.02)
 
-        # cross-attention (hand-written to avoid nn.MultiheadAttention CPU fallback)
-        self.num_heads = num_heads
+        # per-tick: thoughts → feature_map attention
         self.q_proj = nn.Linear(dim, dim)
-        self.k_proj = nn.Linear(dim, dim)
-        self.v_proj = nn.Linear(dim, dim)
+        self.kv_proj = nn.Linear(dim, dim * 2)
         self.attn_out_proj = nn.Linear(dim, dim)
         self.norm1 = nn.LayerNorm(dim)
 
-        # synapse: concat(attn_out, input) → new state
+        # synapse: concat(thoughts, attn_out) → new thoughts
         self.synapse = nn.Sequential(
-            nn.Linear(dim * 2, dim),
-            nn.GELU(),
-            nn.Linear(dim, dim),
-            nn.LayerNorm(dim),
-        )
+            nn.Linear(dim * 2, dim), nn.GELU(),
+            nn.Linear(dim, dim), nn.LayerNorm(dim))
 
-        # NLM: per-neuron processing of memory trace
+        # NLM: per-neuron memory processing
         self.nlm = SuperLinear(memory_length, dim)
         self.nlm_norm = nn.LayerNorm(dim)
 
-        # output
+        # output broadcast: feature_map cells → thoughts
+        self.out_q_proj = nn.Linear(dim, dim)
+        self.out_kv_proj = nn.Linear(dim, dim * 2)
+        self.out_attn_proj = nn.Linear(dim, dim)
         self.out_norm = nn.LayerNorm(dim)
-        self.out_proj = nn.Linear(dim, dim)
 
-    def _tick(self, state, x, trace):
-        """One CTM tick: attention → synapse → NLM. Pure function for checkpointing."""
-        # 1. cross-attention (SDPA, GPU-friendly)
-        q = self.q_proj(state)
-        k = self.k_proj(x)
-        v = self.v_proj(x)
-        B, N, D = q.shape
+    def _tick(self, thoughts, kv_input, trace):
+        """One tick: K thoughts attend to N cells, update via synapse + NLM."""
+        q = self.q_proj(thoughts)          # (B, K, D)
+        kv = self.kv_proj(kv_input)        # (B, N, 2D)
+        k, v = kv.chunk(2, dim=-1)         # (B, N, D) each
+        B, K, D = q.shape
+        N = k.size(1)
         hd = D // self.num_heads
-        qh = q.reshape(B, N, self.num_heads, hd).transpose(1, 2)
+        qh = q.reshape(B, K, self.num_heads, hd).transpose(1, 2)
         kh = k.reshape(B, N, self.num_heads, hd).transpose(1, 2)
         vh = v.reshape(B, N, self.num_heads, hd).transpose(1, 2)
-        attn_out = F.scaled_dot_product_attention(qh, kh, vh)
-        attn_out = attn_out.transpose(1, 2).reshape(B, N, D)
+        attn_out = F.scaled_dot_product_attention(qh, kh, vh)  # (B, H, K, hd)
+        attn_out = attn_out.transpose(1, 2).reshape(B, K, D)
         attn_out = self.attn_out_proj(attn_out)
-        state = self.norm1(state + attn_out)
+        thoughts = self.norm1(thoughts + attn_out)
+        thoughts = self.synapse(torch.cat([thoughts, attn_out], dim=-1))
 
-        # 2. synapse update
-        state = self.synapse(torch.cat([state, x], dim=-1))
-
-        # 3. slide memory trace
-        trace = torch.cat([trace[..., 1:], state.unsqueeze(-1)], dim=-1)
-
-        # 4. NLM: per-neuron processing
+        trace = torch.cat([trace[..., 1:], thoughts.unsqueeze(-1)], dim=-1)
         nlm_out = self.nlm(trace)
-        state = state + self.nlm_norm(nlm_out)
-        return state, trace
+        thoughts = thoughts + self.nlm_norm(nlm_out)
+        return thoughts, trace
 
     def forward(self, feature_map, mask):
-        """
-        feature_map: (B, N, D) — encoder output
-        mask: (B, N) bool — True = masked cells (replaced with mask_token)
-        Returns: (B, N, D) predicted latents for all cells
-        """
+        """feature_map: (B,N,D), mask: (B,N) bool → predicted latents (B,N,D)."""
         B, N, D = feature_map.shape
         M = self.memory_length
+        K = self.num_thoughts
 
-        # replace masked cells with mask_token
+        # prepare kv from feature map (mask replacement)
         x = feature_map + self.pos
         m = mask.unsqueeze(-1)
         x = torch.where(m, self.mask_token.expand(B, N, D) + self.pos, x)
 
-        # init state and trace
-        state = x
-        trace = state.unsqueeze(-1).expand(B, N, D, M).contiguous()
+        # init thoughts + trace
+        thoughts = self.thought_init.expand(B, K, D)
+        trace = thoughts.unsqueeze(-1).expand(B, K, D, M).contiguous()
 
+        # T ticks of iterative reasoning
         for _ in range(self.num_iters):
-            if self.training:
-                state, trace = checkpoint(self._tick, state, x, trace, use_reentrant=False)
+            if self.training and self.use_checkpoint:
+                thoughts, trace = checkpoint(self._tick, thoughts, x, trace, use_reentrant=False)
             else:
-                state, trace = self._tick(state, x, trace)
+                thoughts, trace = self._tick(thoughts, x, trace)
 
-        return self.out_proj(self.out_norm(state))
+        # broadcast: N cells query K thoughts → predicted latents
+        q = self.out_q_proj(x)              # (B, N, D)
+        kv = self.out_kv_proj(thoughts)     # (B, K, 2D)
+        k, v = kv.chunk(2, dim=-1)
+        hd = D // self.num_heads
+        qh = q.reshape(B, N, self.num_heads, hd).transpose(1, 2)
+        kh = k.reshape(B, K, self.num_heads, hd).transpose(1, 2)
+        vh = v.reshape(B, K, self.num_heads, hd).transpose(1, 2)
+        out = F.scaled_dot_product_attention(qh, kh, vh)
+        out = out.transpose(1, 2).reshape(B, N, D)
+        out = self.out_norm(x + self.out_attn_proj(out))
+        return out
 
 
 class CTMJepa(nn.Module):
     def __init__(self, arch="convnext", img_size=224, hidden=768, layers=12,
-                 heads=12, patch=16, ema_tau=0.996, ctm_iters=10, ctm_memory=4):
+                 heads=12, patch=16, ema_tau=0.996, ctm_iters=50, ctm_memory=4,
+                 ctm_thoughts=8):
         super().__init__()
         self.encoder = build_encoder(arch, img_size=img_size, dim=hidden,
                                      patch=patch, depth=layers, heads=heads)
@@ -178,10 +193,10 @@ class CTMJepa(nn.Module):
         nn.init.trunc_normal_(self.pos, std=0.02)
         nn.init.normal_(self.mask_token, std=0.02)
 
-        # CTM predictor (replaces 4-layer Transformer)
+        # CTM predictor (thought-token based, T ticks)
         self.predictor = CTMPredictor(
             self.feat_dim, g * g, num_iters=ctm_iters, memory_length=ctm_memory,
-            num_heads=max(1, self.feat_dim // 64))
+            num_thoughts=ctm_thoughts, num_heads=max(1, self.feat_dim // 64))
         self.pred_norm = nn.LayerNorm(self.feat_dim)
 
         self.target_encoder = self._copy(self.encoder)
@@ -276,8 +291,10 @@ def build_args():
     p.add_argument("--lam", type=float, default=0.1)
     p.add_argument("--w_mse", type=float, default=0.3)
     p.add_argument("--w_clip", type=float, default=1.0)
-    p.add_argument("--ctm_iters", type=int, default=10, help="CTM thinking ticks")
-    p.add_argument("--ctm_memory", type=int, default=4, help="CTM memory length")
+    p.add_argument("--ctm_iters", type=int, default=50, help="CTM thinking ticks (T)")
+    p.add_argument("--ctm_memory", type=int, default=4, help="CTM memory length (M)")
+    p.add_argument("--ctm_thoughts", type=int, default=8, help="number of thought tokens (K)")
+    p.add_argument("--grad_checkpoint", type=int, default=1, help="gradient checkpointing (1=on for T>20)")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=3e-4)
     p.add_argument("--wd", type=float, default=1e-3)
@@ -320,9 +337,12 @@ def main():
                            collate_fn=collate)
 
     model = CTMJepa("convnext", args.img_size, args.hidden, args.layers, args.heads,
-                    args.patch_size, args.ema_tau, args.ctm_iters, args.ctm_memory).to(device)
+                    args.patch_size, args.ema_tau, args.ctm_iters, args.ctm_memory,
+                    args.ctm_thoughts).to(device)
+    base = model.module if isinstance(model, DDP) else model
+    base.predictor.use_checkpoint = bool(args.grad_checkpoint)
     if world > 1:
-        model = DDP(model, device_ids=[local_rank], find_unused_parameters=True)
+        model = DDP(model, device_ids=[local_rank], find_unused_parameters=False)
     base = model.module if isinstance(model, DDP) else model
     if is_main:
         n_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
