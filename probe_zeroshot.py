@@ -83,8 +83,8 @@ def main():
     print(f"[zs] ckpt={args.ckpt}  grid={grid}", flush=True)
 
     model = CrossModalJEPA("convnext", img_size, margs["hidden"], margs["layers"],
-                           margs["heads"], margs["patch_size"], margs["pred_depth"],
-                           margs["ema_tau"]).to(device)
+                           margs["heads"], margs["patch_size"], margs.get("pred_depth", 4),
+                           margs.get("ema_tau", 0.996)).to(device)
     model.load_state_dict(ck["model"], strict=False)
     model.eval()
 
