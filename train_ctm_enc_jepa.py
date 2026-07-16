@@ -219,8 +219,8 @@ class CTMEncoderJepa(nn.Module):
             return ctx
         return ctx.mean(dim=1)
 
-    def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0,
-                loss_type="siglip"):
+    def forward(self, composite, word_masks=None, word_valid=None, lam=0.0, w_mse=1.0, w_clip=1.0,
+                loss_type="siglip", align_mode="sentence"):
         # === SPLIT GRADIENT PATHS ===
         # raw: backbone only → JEPA (gradient to backbone, NOT enhancer)
         ctx_raw = self.backbone(composite, return_map=True)  # (B, N, D)
@@ -248,13 +248,8 @@ class CTMEncoderJepa(nn.Module):
         loss = w_mse * mse_loss
         stats = {}
 
-        # --- CLIP/SigLIP on ENHANCED features (enhancer optimized here) ---
-        if w_clip > 0 and word_masks is not None:
-            wm = word_masks.to(dev).float()
-            wv = word_valid.to(dev).float()
-            word_feats = torch.einsum("bwn,bnd->bwd", wm, ctx_enh.float())
-            denom = wm.sum(dim=2).clamp(min=1).unsqueeze(-1)
-            word_feats = F.normalize(word_feats / denom, dim=-1)
+        # --- CLIP/SigLIP on ENHANCED features ---
+        if w_clip > 0:
             photo_idx = self.photo_cells.to(dev)
             photo_global = F.normalize(ctx_enh[:, photo_idx].mean(dim=1), dim=-1)
 
@@ -270,23 +265,45 @@ class CTMEncoderJepa(nn.Module):
                     photo_all = torch.cat(gathered, dim=0)
 
             logit_scale = self.logit_scale.exp().clamp(max=100.0)
-            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all)
-            Bm, max_w, Nb = sim.shape
 
-            if loss_type == "siglip":
-                labels_2d = torch.zeros(Bm, Nb, device=sim.device)
-                diag = torch.arange(Bm, device=sim.device) + rank * Bm
-                labels_2d[torch.arange(Bm), diag] = 1.0
-                sign = (2 * labels_2d - 1).unsqueeze(1).expand(Bm, max_w, Nb)
-                per_elem = -F.logsigmoid(sim * logit_scale * sign)
-                clip_loss = (per_elem.mean(dim=2) * wv).sum() / wv.sum().clamp(min=1)
+            if align_mode == "sentence":
+                # sentence-level: text global pooling vs photo global
+                text_idx = self.text_cells.to(dev)
+                text_global = F.normalize(ctx_enh[:, text_idx].mean(dim=1), dim=-1)
+                # gather text across GPUs too
+                text_all = text_global
+                if dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1:
+                    gathered_t = [torch.zeros_like(text_global) for _ in range(world)]
+                    dist.all_gather(gathered_t, text_global.contiguous())
+                    gathered_t[rank] = text_global
+                    text_all = torch.cat(gathered_t, dim=0)
+                sim = (text_all @ photo_all.T) * logit_scale  # (world*B, world*B)
+                Nb = sim.size(0)
+                labels = torch.eye(Nb, device=sim.device)
+                sign = 2 * labels - 1
+                clip_loss = -F.logsigmoid(sim * sign).mean()
             else:
-                sim_scaled = sim * logit_scale
-                labels = torch.arange(Bm, device=dev) + rank * Bm
-                labels = labels.unsqueeze(1).expand(Bm, max_w)
-                ce = F.cross_entropy(sim_scaled.reshape(Bm * max_w, Nb),
-                                     labels.reshape(Bm * max_w), reduction="none")
-                clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
+                # word-level: each word vs photo
+                wm = word_masks.to(dev).float()
+                wv = word_valid.to(dev).float()
+                word_feats = torch.einsum("bwn,bnd->bwd", wm, ctx_enh.float())
+                denom = wm.sum(dim=2).clamp(min=1).unsqueeze(-1)
+                word_feats = F.normalize(word_feats / denom, dim=-1)
+                sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all)
+                Bm, max_w, Nb = sim.shape
+                if loss_type == "siglip":
+                    labels_2d = torch.zeros(Bm, Nb, device=sim.device)
+                    diag = torch.arange(Bm, device=sim.device) + rank * Bm
+                    labels_2d[torch.arange(Bm), diag] = 1.0
+                    sign = (2 * labels_2d - 1).unsqueeze(1).expand(Bm, max_w, Nb)
+                    clip_loss = (-F.logsigmoid(sim * logit_scale * sign).mean(2) * wv).sum() / wv.sum().clamp(min=1)
+                else:
+                    sim_scaled = sim * logit_scale
+                    labels = torch.arange(Bm, device=dev) + rank * Bm
+                    labels = labels.unsqueeze(1).expand(Bm, max_w)
+                    ce = F.cross_entropy(sim_scaled.reshape(Bm * max_w, Nb), labels.reshape(Bm * max_w), reduction="none")
+                    clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
+
             stats["clip"] = clip_loss.detach()
             loss = loss + w_clip * clip_loss
 
@@ -315,8 +332,9 @@ def build_args():
     p.add_argument("--lam", type=float, default=0.1)
     p.add_argument("--w_mse", type=float, default=0.3)
     p.add_argument("--w_clip", type=float, default=1.0)
-    p.add_argument("--loss_type", type=str, default="siglip", choices=["siglip", "info_nce"],
-                   help="siglip=sigmoid loss (better small batch), info_nce=softmax")
+    p.add_argument("--loss_type", type=str, default="siglip", choices=["siglip", "info_nce"])
+    p.add_argument("--align_mode", type=str, default="sentence", choices=["sentence", "word"],
+                   help="sentence=stable global alignment, word=per-word alignment")
     p.add_argument("--ctm_iters", type=int, default=50)
     p.add_argument("--ctm_memory", type=int, default=4)
     p.add_argument("--ctm_thoughts", type=int, default=8)
@@ -419,7 +437,7 @@ def main():
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 loss, stats = model(composite, word_masks, word_valid,
                                     lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip,
-                                    loss_type=args.loss_type)
+                                    loss_type=args.loss_type, align_mode=args.align_mode)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if torch.isnan(grad_norm) or torch.isinf(grad_norm):
