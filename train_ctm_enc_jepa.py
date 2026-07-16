@@ -139,8 +139,10 @@ class CTMEncoderJepa(nn.Module):
 
     def __init__(self, arch="convnext", img_size=224, hidden=768, layers=12,
                  heads=12, patch=16, pred_depth=4, ema_tau=0.996,
-                 ctm_iters=50, ctm_memory=4, ctm_thoughts=8, bptt_window=15):
+                 ctm_iters=50, ctm_memory=4, ctm_thoughts=8, bptt_window=15,
+                 freeze_enhancer=False):
         super().__init__()
+        self.freeze_enhancer = freeze_enhancer
         # backbone (standard ConvNeXt)
         self.backbone = build_encoder(arch, img_size=img_size, dim=hidden,
                                       patch=patch, depth=layers, heads=heads)
@@ -170,6 +172,9 @@ class CTMEncoderJepa(nn.Module):
         # EMA target (backbone + enhancer)
         self.target_backbone = self._copy(self.backbone)
         self.target_enhancer = self._copy(self.enhancer)
+        if self.freeze_enhancer:
+            for p in self.enhancer.parameters():
+                p.requires_grad_(False)
         self.ema_tau = ema_tau
         self.sigreg = SIGReg()
         self.logit_scale = nn.Parameter(torch.tensor(np.log(1.0 / 0.07)))
@@ -186,8 +191,9 @@ class CTMEncoderJepa(nn.Module):
         with torch.no_grad():
             for p, t in zip(self.backbone.parameters(), self.target_backbone.parameters()):
                 t.data.mul_(self.ema_tau).add_(p.data, alpha=1 - self.ema_tau)
-            for p, t in zip(self.enhancer.parameters(), self.target_enhancer.parameters()):
-                t.data.mul_(self.ema_tau).add_(p.data, alpha=1 - self.ema_tau)
+            if not self.freeze_enhancer:
+                for p, t in zip(self.enhancer.parameters(), self.target_enhancer.parameters()):
+                    t.data.mul_(self.ema_tau).add_(p.data, alpha=1 - self.ema_tau)
 
     def _encode(self, x, target=False):
         """Encode image → enhanced feature map (B, N, D)."""
@@ -307,6 +313,7 @@ def build_args():
     p.add_argument("--ctm_thoughts", type=int, default=8)
     p.add_argument("--bptt_window", type=int, default=15)
     p.add_argument("--grad_checkpoint", type=int, default=1)
+    p.add_argument("--freeze_enhancer", type=int, default=0, help="1=freeze CTM enhancer params (preserve initial features)")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=2e-4, help="lr for predictor + other params")
     p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone + enhancer (low to protect CTM)")
@@ -352,7 +359,7 @@ def main():
     model = CTMEncoderJepa("convnext", args.img_size, args.hidden, args.layers, args.heads,
                            args.patch_size, args.pred_depth, args.ema_tau,
                            args.ctm_iters, args.ctm_memory, args.ctm_thoughts,
-                           args.bptt_window).to(device)
+                           args.bptt_window, freeze_enhancer=bool(args.freeze_enhancer)).to(device)
     base = model.module if isinstance(model, DDP) else model
     if hasattr(base.enhancer, "use_checkpoint"):
         base.enhancer.use_checkpoint = bool(args.grad_checkpoint)
