@@ -209,7 +209,8 @@ class CTMEncoderJepa(nn.Module):
             return ctx
         return ctx.mean(dim=1)
 
-    def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0):
+    def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0,
+                loss_type="siglip"):
         # enhanced feature maps (student + target)
         ctx = self._encode(composite, target=False)
         with torch.no_grad():
@@ -253,12 +254,25 @@ class CTMEncoderJepa(nn.Module):
                     photo_all = torch.cat(gathered, dim=0)
 
             logit_scale = self.logit_scale.exp().clamp(max=100.0)
-            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all) * logit_scale
+            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all)  # unscaled
             Bm, max_w, Nb = sim.shape
-            labels = torch.arange(Bm, device=ctx.device) + rank * Bm
-            labels = labels.unsqueeze(1).expand(Bm, max_w)
-            ce = F.cross_entropy(sim.reshape(Bm * max_w, Nb), labels.reshape(Bm * max_w), reduction="none")
-            clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
+
+            if loss_type == "siglip":
+                # SigLIP: element-wise sigmoid (better at small batch <16k)
+                labels_2d = torch.zeros(Bm, Nb, device=sim.device)
+                diag = torch.arange(Bm, device=sim.device) + rank * Bm
+                labels_2d[torch.arange(Bm), diag] = 1.0
+                sign = (2 * labels_2d - 1).unsqueeze(1).expand(Bm, max_w, Nb)  # +1 pos, -1 neg
+                per_elem = -F.logsigmoid(sim * logit_scale * sign)  # (Bm, max_w, Nb)
+                clip_loss = (per_elem.mean(dim=2) * wv).sum() / wv.sum().clamp(min=1)
+            else:
+                # InfoNCE: softmax cross-entropy (original)
+                sim_scaled = sim * logit_scale
+                labels = torch.arange(Bm, device=ctx.device) + rank * Bm
+                labels = labels.unsqueeze(1).expand(Bm, max_w)
+                ce = F.cross_entropy(sim_scaled.reshape(Bm * max_w, Nb),
+                                     labels.reshape(Bm * max_w), reduction="none")
+                clip_loss = (ce.reshape(Bm, max_w) * wv).sum() / wv.sum().clamp(min=1)
             stats["clip"] = clip_loss.detach()
             loss = loss + w_clip * clip_loss
 
@@ -286,6 +300,8 @@ def build_args():
     p.add_argument("--lam", type=float, default=0.1)
     p.add_argument("--w_mse", type=float, default=0.3)
     p.add_argument("--w_clip", type=float, default=1.0)
+    p.add_argument("--loss_type", type=str, default="siglip", choices=["siglip", "info_nce"],
+                   help="siglip=sigmoid loss (better small batch), info_nce=softmax")
     p.add_argument("--ctm_iters", type=int, default=50)
     p.add_argument("--ctm_memory", type=int, default=4)
     p.add_argument("--ctm_thoughts", type=int, default=8)
@@ -386,7 +402,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 loss, stats = model(composite, word_masks, word_valid,
-                                    lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip)
+                                    lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip,
+                                    loss_type=args.loss_type)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if torch.isnan(grad_norm) or torch.isinf(grad_norm):
