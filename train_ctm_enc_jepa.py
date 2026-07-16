@@ -202,6 +202,13 @@ class CTMEncoderJepa(nn.Module):
     def encode(self, x):
         return self._encode(x).mean(dim=1)
 
+    def encoder(self, x, return_map=False):
+        """Compatibility for semantic_eval / probe code expecting model.encoder."""
+        ctx = self._encode(x, target=False)
+        if return_map:
+            return ctx
+        return ctx.mean(dim=1)
+
     def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0):
         # enhanced feature maps (student + target)
         ctx = self._encode(composite, target=False)
