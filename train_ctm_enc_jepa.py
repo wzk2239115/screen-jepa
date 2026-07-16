@@ -187,13 +187,17 @@ class CTMEncoderJepa(nn.Module):
             p.requires_grad_(False)
         return c
 
-    def update_ema(self):
+    def update_ema(self, epoch=0, total_epochs=1):
+        # EMA tau annealing: 0.996 → 1.000 (I-JEPA style, target gets more stable)
+        import math
+        progress = min(epoch / max(total_epochs, 1), 1.0)
+        tau = self.ema_tau + (1.0 - self.ema_tau) * (1 - math.cos(math.pi * progress)) / 2
         with torch.no_grad():
             for p, t in zip(self.backbone.parameters(), self.target_backbone.parameters()):
-                t.data.mul_(self.ema_tau).add_(p.data, alpha=1 - self.ema_tau)
+                t.data.mul_(tau).add_(p.data, alpha=1 - tau)
             if not self.freeze_enhancer:
                 for p, t in zip(self.enhancer.parameters(), self.target_enhancer.parameters()):
-                    t.data.mul_(self.ema_tau).add_(p.data, alpha=1 - self.ema_tau)
+                    t.data.mul_(tau).add_(p.data, alpha=1 - tau)
 
     def _encode(self, x, target=False):
         """Encode image → enhanced feature map (B, N, D)."""
@@ -419,7 +423,7 @@ def main():
                 opt.zero_grad(set_to_none=True)
                 continue
             opt.step(); sched.step()
-            base.update_ema()
+            base.update_ema(epoch, args.epochs)
             if is_main:
                 if step % args.log_every == 0:
                     clip_val = float(stats.get("clip", torch.tensor(0.0)))
