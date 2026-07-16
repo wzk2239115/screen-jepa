@@ -82,9 +82,18 @@ def main():
     patch = margs["patch_size"]
     print(f"[zs] ckpt={args.ckpt}  grid={grid}", flush=True)
 
-    model = CrossModalJEPA("convnext", img_size, margs["hidden"], margs["layers"],
-                           margs["heads"], margs["patch_size"], margs.get("pred_depth", 4),
-                           margs.get("ema_tau", 0.996)).to(device)
+    if margs.get("objective") == "ctm_enc_jepa":
+        from train_ctm_enc_jepa import CTMEncoderJepa
+        model = CTMEncoderJepa("convnext", img_size, margs["hidden"], margs["layers"],
+                               margs["heads"], margs["patch_size"], margs.get("pred_depth", 4),
+                               margs.get("ema_tau", 0.996), margs.get("ctm_iters", 50),
+                               margs.get("ctm_memory", 4), margs.get("ctm_thoughts", 8),
+                               margs.get("bptt_window", 15)).to(device)
+        print(f"[zs] loaded CTMEncoderJepa (ctm_iters={margs.get('ctm_iters',50)})", flush=True)
+    else:
+        model = CrossModalJEPA("convnext", img_size, margs["hidden"], margs["layers"],
+                               margs["heads"], margs["patch_size"], margs.get("pred_depth", 4),
+                               margs.get("ema_tau", 0.996)).to(device)
     model.load_state_dict(ck["model"], strict=False)
     model.eval()
 
