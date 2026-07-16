@@ -221,36 +221,42 @@ class CTMEncoderJepa(nn.Module):
 
     def forward(self, composite, word_masks, word_valid, lam=0.0, w_mse=1.0, w_clip=1.0,
                 loss_type="siglip"):
-        # enhanced feature maps (student + target)
-        ctx = self._encode(composite, target=False)
+        # === SPLIT GRADIENT PATHS ===
+        # raw: backbone only → JEPA (gradient to backbone, NOT enhancer)
+        ctx_raw = self.backbone(composite, return_map=True)  # (B, N, D)
+        # enhanced: backbone + enhancer → CLIP (gradient to both)
+        ctx_enh = self.enhancer(ctx_raw)  # (B, N, D)
+        # JEPA target: EMA backbone only
         with torch.no_grad():
-            tgt = self._encode(composite, target=True)
-        B, N, D = ctx.shape
+            tgt_raw = self.target_backbone(composite, return_map=True).detach()
 
-        # JEPA masked latent prediction
+        B, N, D = ctx_raw.shape
+        dev = ctx_raw.device
+
+        # --- JEPA on RAW features (enhancer not involved) ---
         def predict_region(mask_region):
-            inp = ctx + self.pos
-            m = mask_region.unsqueeze(0).expand(B, -1).unsqueeze(-1)
+            inp = ctx_raw + self.pos
+            m = mask_region.to(dev).unsqueeze(0).expand(B, -1).unsqueeze(-1)
             inp = torch.where(m, self.mask_token.expand(B, N, D), inp)
             out = self.pred_norm(self.predictor(inp))
-            return out[mask_region.unsqueeze(0).expand(B, -1)].reshape(B, -1, D), \
-                   tgt[mask_region.unsqueeze(0).expand(B, -1)].reshape(B, -1, D)
+            mr = mask_region.to(dev).unsqueeze(0).expand(B, -1)
+            return out[mr].reshape(B, -1, D), tgt_raw[mr].reshape(B, -1, D)
 
-        pred_t, tgt_t = predict_region(self.text_cells.to(ctx.device))
-        pred_p, tgt_p = predict_region(self.photo_cells.to(ctx.device))
+        pred_t, tgt_t = predict_region(self.text_cells)
+        pred_p, tgt_p = predict_region(self.photo_cells)
         mse_loss = F.mse_loss(pred_t, tgt_t) + F.mse_loss(pred_p, tgt_p)
         loss = w_mse * mse_loss
         stats = {}
 
-        # word-level CLIP (uses ENHANCED feature map)
+        # --- CLIP/SigLIP on ENHANCED features (enhancer optimized here) ---
         if w_clip > 0 and word_masks is not None:
-            wm = word_masks.to(ctx.device).float()
-            wv = word_valid.to(ctx.device).float()
-            word_feats = torch.einsum("bwn,bnd->bwd", wm, ctx.float())
+            wm = word_masks.to(dev).float()
+            wv = word_valid.to(dev).float()
+            word_feats = torch.einsum("bwn,bnd->bwd", wm, ctx_enh.float())
             denom = wm.sum(dim=2).clamp(min=1).unsqueeze(-1)
             word_feats = F.normalize(word_feats / denom, dim=-1)
-            photo_idx = self.photo_cells.to(ctx.device)
-            photo_global = F.normalize(ctx[:, photo_idx].mean(dim=1), dim=-1)
+            photo_idx = self.photo_cells.to(dev)
+            photo_global = F.normalize(ctx_enh[:, photo_idx].mean(dim=1), dim=-1)
 
             rank = 0
             photo_all = photo_global
@@ -264,21 +270,19 @@ class CTMEncoderJepa(nn.Module):
                     photo_all = torch.cat(gathered, dim=0)
 
             logit_scale = self.logit_scale.exp().clamp(max=100.0)
-            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all)  # unscaled
+            sim = torch.einsum("bwd,cd->bwc", word_feats, photo_all)
             Bm, max_w, Nb = sim.shape
 
             if loss_type == "siglip":
-                # SigLIP: element-wise sigmoid (better at small batch <16k)
                 labels_2d = torch.zeros(Bm, Nb, device=sim.device)
                 diag = torch.arange(Bm, device=sim.device) + rank * Bm
                 labels_2d[torch.arange(Bm), diag] = 1.0
-                sign = (2 * labels_2d - 1).unsqueeze(1).expand(Bm, max_w, Nb)  # +1 pos, -1 neg
-                per_elem = -F.logsigmoid(sim * logit_scale * sign)  # (Bm, max_w, Nb)
+                sign = (2 * labels_2d - 1).unsqueeze(1).expand(Bm, max_w, Nb)
+                per_elem = -F.logsigmoid(sim * logit_scale * sign)
                 clip_loss = (per_elem.mean(dim=2) * wv).sum() / wv.sum().clamp(min=1)
             else:
-                # InfoNCE: softmax cross-entropy (original)
                 sim_scaled = sim * logit_scale
-                labels = torch.arange(Bm, device=ctx.device) + rank * Bm
+                labels = torch.arange(Bm, device=dev) + rank * Bm
                 labels = labels.unsqueeze(1).expand(Bm, max_w)
                 ce = F.cross_entropy(sim_scaled.reshape(Bm * max_w, Nb),
                                      labels.reshape(Bm * max_w), reduction="none")
@@ -286,8 +290,9 @@ class CTMEncoderJepa(nn.Module):
             stats["clip"] = clip_loss.detach()
             loss = loss + w_clip * clip_loss
 
+        # SIGReg on enhanced features
         if lam > 0:
-            reg = self.sigreg(ctx.transpose(0, 1))
+            reg = self.sigreg(ctx_enh.transpose(0, 1))
             loss = loss + lam * reg
             stats["reg"] = reg.detach()
         with torch.no_grad():
