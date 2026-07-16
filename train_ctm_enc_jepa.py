@@ -292,7 +292,8 @@ def build_args():
     p.add_argument("--bptt_window", type=int, default=15)
     p.add_argument("--grad_checkpoint", type=int, default=1)
     p.add_argument("--batch", type=int, default=256)
-    p.add_argument("--lr", type=float, default=2e-4)
+    p.add_argument("--lr", type=float, default=2e-4, help="lr for predictor + other params")
+    p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone + enhancer (low to protect CTM)")
     p.add_argument("--wd", type=float, default=1e-3)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--warmup", type=float, default=0.05)
@@ -347,8 +348,19 @@ def main():
         print(f"[model] CTMEncoderJepa params(M)={n_params/1e6:.1f} "
               f"ctm_iters={args.ctm_iters} thoughts={args.ctm_thoughts}", flush=True)
 
-    opt = torch.optim.AdamW([p for p in model.parameters() if p.requires_grad],
-                            lr=args.lr, weight_decay=args.wd)
+    # parameter groups: encoder (low lr) vs rest (normal lr)
+    enc_ids = set()
+    for mod in [base.backbone, base.enhancer]:
+        enc_ids.update(id(p) for p in mod.parameters())
+    enc_params = [p for p in model.parameters() if p.requires_grad and id(p) in enc_ids]
+    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in enc_ids]
+    opt = torch.optim.AdamW([
+        {"params": enc_params, "lr": args.lr_encoder},
+        {"params": other_params, "lr": args.lr},
+    ], weight_decay=args.wd)
+    if is_main:
+        print(f"[opt] encoder lr={args.lr_encoder} ({len(enc_params)} params), "
+              f"other lr={args.lr} ({len(other_params)} params)", flush=True)
     total_steps = args.epochs * len(train)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_lambda(s, total_steps, args.warmup))
 
