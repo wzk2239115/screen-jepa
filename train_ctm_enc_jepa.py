@@ -348,6 +348,8 @@ def build_args():
     p.add_argument("--freeze_enhancer", type=int, default=0, help="1=freeze CTM enhancer params (preserve initial features)")
     p.add_argument("--unified_epochs", type=int, default=0,
                    help="epochs with UNIFIED gradient (JEPA through enhancer) before switching to split_grad; 0=always split_grad")
+    p.add_argument("--freeze_backbone_after", type=int, default=-1,
+                   help="freeze backbone after this epoch (prevents JEPA gradient corrupting semantic features); -1=never")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=2e-4, help="lr for predictor + other params")
     p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone (low to protect)")
@@ -439,8 +441,26 @@ def main():
         split_grad = (epoch >= args.unified_epochs)
         if is_main and epoch == args.unified_epochs and args.unified_epochs > 0:
             print(f"[switch] epoch {epoch}: unified → split_grad", flush=True)
+
+        # freeze backbone after specified epoch (prevents JEPA corrupting semantic features)
+        if args.freeze_backbone_after >= 0:
+            should_freeze = epoch > args.freeze_backbone_after
+            bb_frozen = all(not p.requires_grad for p in base.backbone.parameters())
+            if should_freeze and not bb_frozen:
+                for p in base.backbone.parameters():
+                    p.requires_grad_(False)
+                if is_main:
+                    print(f"[freeze] epoch {epoch}: backbone frozen (JEPA can't corrupt semantic features)", flush=True)
+            elif not should_freeze and bb_frozen:
+                for p in base.backbone.parameters():
+                    p.requires_grad_(True)
+                if is_main:
+                    print(f"[unfreeze] epoch {epoch}: backbone unfrozen", flush=True)
         if is_main:
-            bar = tqdm(train, desc=f"e{epoch}({'sp' if split_grad else 'uni'})", dynamic_ncols=True, mininterval=2.0)
+            tag = 'sp' if split_grad else 'uni'
+            if args.freeze_backbone_after >= 0 and epoch > args.freeze_backbone_after:
+                tag += '+fr'
+            bar = tqdm(train, desc=f"e{epoch}({tag})", dynamic_ncols=True, mininterval=2.0)
         else:
             bar = train
         for composite, word_masks, word_valid in bar:
