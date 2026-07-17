@@ -220,27 +220,32 @@ class CTMEncoderJepa(nn.Module):
         return ctx.mean(dim=1)
 
     def forward(self, composite, word_masks=None, word_valid=None, lam=0.0, w_mse=1.0, w_clip=1.0,
-                loss_type="siglip", align_mode="sentence"):
-        # === SPLIT GRADIENT PATHS ===
-        # raw: backbone only → JEPA (gradient to backbone, NOT enhancer)
+                loss_type="siglip", align_mode="sentence", split_grad=True):
         ctx_raw = self.backbone(composite, return_map=True)  # (B, N, D)
-        # enhanced: backbone + enhancer → CLIP (gradient to both)
         ctx_enh = self.enhancer(ctx_raw)  # (B, N, D)
-        # JEPA target: EMA backbone only
-        with torch.no_grad():
-            tgt_raw = self.target_backbone(composite, return_map=True).detach()
 
-        B, N, D = ctx_raw.shape
-        dev = ctx_raw.device
+        if split_grad:
+            # JEPA on RAW features → gradient to backbone only (NOT enhancer)
+            ctx_jepa = ctx_raw
+            with torch.no_grad():
+                tgt_jepa = self.target_backbone(composite, return_map=True).detach()
+        else:
+            # UNIFIED: JEPA on ENHANCED features → gradient to backbone + enhancer
+            ctx_jepa = ctx_enh
+            with torch.no_grad():
+                tgt_raw = self.target_backbone(composite, return_map=True).detach()
+                tgt_jepa = self.target_enhancer(tgt_raw).detach()
 
-        # --- JEPA on RAW features (enhancer not involved) ---
+        B, N, D = ctx_jepa.shape
+        dev = ctx_jepa.device
+
         def predict_region(mask_region):
-            inp = ctx_raw + self.pos
+            inp = ctx_jepa + self.pos
             m = mask_region.to(dev).unsqueeze(0).expand(B, -1).unsqueeze(-1)
             inp = torch.where(m, self.mask_token.expand(B, N, D), inp)
             out = self.pred_norm(self.predictor(inp))
             mr = mask_region.to(dev).unsqueeze(0).expand(B, -1)
-            return out[mr].reshape(B, -1, D), tgt_raw[mr].reshape(B, -1, D)
+            return out[mr].reshape(B, -1, D), tgt_jepa[mr].reshape(B, -1, D)
 
         pred_t, tgt_t = predict_region(self.text_cells)
         pred_p, tgt_p = predict_region(self.photo_cells)
@@ -341,9 +346,12 @@ def build_args():
     p.add_argument("--bptt_window", type=int, default=15)
     p.add_argument("--grad_checkpoint", type=int, default=1)
     p.add_argument("--freeze_enhancer", type=int, default=0, help="1=freeze CTM enhancer params (preserve initial features)")
+    p.add_argument("--unified_epochs", type=int, default=0,
+                   help="epochs with UNIFIED gradient (JEPA through enhancer) before switching to split_grad; 0=always split_grad")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=2e-4, help="lr for predictor + other params")
-    p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone + enhancer (low to protect CTM)")
+    p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone (low to protect)")
+    p.add_argument("--lr_enhancer", type=float, default=2e-5, help="lr for CTM enhancer (try higher: 1e-4/2e-4)")
     p.add_argument("--wd", type=float, default=1e-3)
     p.add_argument("--epochs", type=int, default=100)
     p.add_argument("--warmup", type=float, default=0.05)
@@ -398,18 +406,21 @@ def main():
         print(f"[model] CTMEncoderJepa params(M)={n_params/1e6:.1f} "
               f"ctm_iters={args.ctm_iters} thoughts={args.ctm_thoughts}", flush=True)
 
-    # parameter groups: encoder (low lr) vs rest (normal lr)
-    enc_ids = set()
-    for mod in [base.backbone, base.enhancer]:
-        enc_ids.update(id(p) for p in mod.parameters())
-    enc_params = [p for p in model.parameters() if p.requires_grad and id(p) in enc_ids]
-    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in enc_ids]
+    # parameter groups: backbone / enhancer / other (separate lr)
+    backbone_ids = set(id(p) for p in base.backbone.parameters())
+    enhancer_ids = set(id(p) for p in base.enhancer.parameters())
+    backbone_params = [p for p in model.parameters() if p.requires_grad and id(p) in backbone_ids]
+    enhancer_params = [p for p in model.parameters() if p.requires_grad and id(p) in enhancer_ids]
+    other_params = [p for p in model.parameters()
+                    if p.requires_grad and id(p) not in backbone_ids and id(p) not in enhancer_ids]
     opt = torch.optim.AdamW([
-        {"params": enc_params, "lr": args.lr_encoder},
+        {"params": backbone_params, "lr": args.lr_encoder},
+        {"params": enhancer_params, "lr": args.lr_enhancer},
         {"params": other_params, "lr": args.lr},
     ], weight_decay=args.wd)
     if is_main:
-        print(f"[opt] encoder lr={args.lr_encoder} ({len(enc_params)} params), "
+        print(f"[opt] backbone lr={args.lr_encoder} ({len(backbone_params)} params), "
+              f"enhancer lr={args.lr_enhancer} ({len(enhancer_params)} params), "
               f"other lr={args.lr} ({len(other_params)} params)", flush=True)
     total_steps = args.epochs * len(train)
     sched = torch.optim.lr_scheduler.LambdaLR(opt, lambda s: lr_lambda(s, total_steps, args.warmup))
@@ -425,8 +436,11 @@ def main():
         if world > 1:
             sampler.set_epoch(epoch)
         model.train()
+        split_grad = (epoch >= args.unified_epochs)
+        if is_main and epoch == args.unified_epochs and args.unified_epochs > 0:
+            print(f"[switch] epoch {epoch}: unified → split_grad", flush=True)
         if is_main:
-            bar = tqdm(train, desc=f"e{epoch}", dynamic_ncols=True, mininterval=2.0)
+            bar = tqdm(train, desc=f"e{epoch}({'sp' if split_grad else 'uni'})", dynamic_ncols=True, mininterval=2.0)
         else:
             bar = train
         for composite, word_masks, word_valid in bar:
@@ -437,7 +451,8 @@ def main():
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 loss, stats = model(composite, word_masks, word_valid,
                                     lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip,
-                                    loss_type=args.loss_type, align_mode=args.align_mode)
+                                    loss_type=args.loss_type, align_mode=args.align_mode,
+                                    split_grad=split_grad)
             loss.backward()
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)
             if torch.isnan(grad_norm) or torch.isinf(grad_norm):
