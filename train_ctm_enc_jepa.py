@@ -336,6 +336,12 @@ def build_args():
     p.add_argument("--ema_tau", type=float, default=0.996)
     p.add_argument("--lam", type=float, default=0.1)
     p.add_argument("--w_mse", type=float, default=0.3)
+    p.add_argument("--w_mse_decay_start", type=int, default=0,
+                   help="epoch to start decaying w_mse to w_mse_min; 0=no decay")
+    p.add_argument("--w_mse_decay_end", type=int, default=0,
+                   help="epoch when w_mse reaches w_mse_min; 0=no decay")
+    p.add_argument("--w_mse_min", type=float, default=0.0,
+                   help="final w_mse value after decay")
     p.add_argument("--w_clip", type=float, default=1.0)
     p.add_argument("--loss_type", type=str, default="siglip", choices=["siglip", "info_nce"])
     p.add_argument("--align_mode", type=str, default="sentence", choices=["sentence", "word"],
@@ -442,6 +448,18 @@ def main():
         if is_main and epoch == args.unified_epochs and args.unified_epochs > 0:
             print(f"[switch] epoch {epoch}: unified → split_grad", flush=True)
 
+        # w_mse scheduling: linear decay from w_mse to w_mse_min
+        if args.w_mse_decay_end > 0 and epoch >= args.w_mse_decay_start:
+            if epoch < args.w_mse_decay_end:
+                frac = (epoch - args.w_mse_decay_start) / max(args.w_mse_decay_end - args.w_mse_decay_start, 1)
+                cur_w_mse = args.w_mse + (args.w_mse_min - args.w_mse) * frac
+            else:
+                cur_w_mse = args.w_mse_min
+            if is_main and (epoch == args.w_mse_decay_start or epoch == args.w_mse_decay_end):
+                print(f"[w_mse] epoch {epoch}: w_mse={cur_w_mse:.4f}", flush=True)
+        else:
+            cur_w_mse = args.w_mse
+
         # freeze backbone after specified epoch (prevents JEPA corrupting semantic features)
         if args.freeze_backbone_after >= 0:
             should_freeze = epoch > args.freeze_backbone_after
@@ -470,7 +488,7 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 loss, stats = model(composite, word_masks, word_valid,
-                                    lam=args.lam, w_mse=args.w_mse, w_clip=args.w_clip,
+                                    lam=args.lam, w_mse=cur_w_mse, w_clip=args.w_clip,
                                     loss_type=args.loss_type, align_mode=args.align_mode,
                                     split_grad=split_grad)
             loss.backward()
