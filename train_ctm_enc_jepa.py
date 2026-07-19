@@ -342,6 +342,10 @@ def build_args():
                    help="epoch when w_mse reaches w_mse_min; 0=no decay")
     p.add_argument("--w_mse_min", type=float, default=0.0,
                    help="final w_mse value after decay")
+    p.add_argument("--w_mse_cycle", type=int, default=0,
+                   help="cycle length for repeating boost+decay (0=no cycling). "
+                        "Each cycle: ep0..decay_start=boost, decay_start..decay_end=decay, "
+                        "decay_end..cycle=rest. split_grad also cycles with unified_epochs.")
     p.add_argument("--w_clip", type=float, default=1.0)
     p.add_argument("--loss_type", type=str, default="siglip", choices=["siglip", "info_nce"])
     p.add_argument("--align_mode", type=str, default="sentence", choices=["sentence", "word"],
@@ -444,18 +448,27 @@ def main():
         if world > 1:
             sampler.set_epoch(epoch)
         model.train()
-        split_grad = (epoch >= args.unified_epochs)
-        if is_main and epoch == args.unified_epochs and args.unified_epochs > 0:
+        # cyclic schedule: use epoch within cycle for w_mse and split_grad
+        if args.w_mse_cycle > 0:
+            ep = epoch % args.w_mse_cycle
+            cycle_num = epoch // args.w_mse_cycle
+            if is_main and ep == 0 and epoch > 0:
+                print(f"[cycle] epoch {epoch}: starting cycle {cycle_num}", flush=True)
+        else:
+            ep = epoch
+
+        split_grad = (ep >= args.unified_epochs)
+        if is_main and ep == args.unified_epochs and args.unified_epochs > 0:
             print(f"[switch] epoch {epoch}: unified → split_grad", flush=True)
 
         # w_mse scheduling: linear decay from w_mse to w_mse_min
-        if args.w_mse_decay_end > 0 and epoch >= args.w_mse_decay_start:
-            if epoch < args.w_mse_decay_end:
-                frac = (epoch - args.w_mse_decay_start) / max(args.w_mse_decay_end - args.w_mse_decay_start, 1)
+        if args.w_mse_decay_end > 0 and ep >= args.w_mse_decay_start:
+            if ep < args.w_mse_decay_end:
+                frac = (ep - args.w_mse_decay_start) / max(args.w_mse_decay_end - args.w_mse_decay_start, 1)
                 cur_w_mse = args.w_mse + (args.w_mse_min - args.w_mse) * frac
             else:
                 cur_w_mse = args.w_mse_min
-            if is_main and (epoch == args.w_mse_decay_start or epoch == args.w_mse_decay_end):
+            if is_main and (ep == args.w_mse_decay_start or ep == args.w_mse_decay_end):
                 print(f"[w_mse] epoch {epoch}: w_mse={cur_w_mse:.4f}", flush=True)
         else:
             cur_w_mse = args.w_mse
