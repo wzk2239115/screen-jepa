@@ -375,6 +375,7 @@ def build_args():
     p.add_argument("--out", default="./outputs/ctm_enc_jepa")
     p.add_argument("--save_every", type=int, default=20)
     p.add_argument("--eval_every", type=int, default=10)
+    p.add_argument("--augment", type=int, default=0, help="1=photo augmentation (flip, color jitter)")
     return p.parse_args()
 
 
@@ -391,7 +392,7 @@ def main():
 
     grid = args.img_size // args.patch_size
     ds = TarImageText(args.tar_dir, args.num_tars, args.img_size,
-                      grid=grid, patch_size=args.patch_size)
+                      grid=grid, patch_size=args.patch_size, augment=bool(args.augment))
     collate = make_collate(grid)
     if world > 1:
         sampler = DistributedSampler(ds, shuffle=True, drop_last=True)

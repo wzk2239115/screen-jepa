@@ -111,7 +111,8 @@ def _tar(path):
 
 class TarImageText(Dataset):
     def __init__(self, tar_dir, num_tars=None, img_size=224, font_path=DEFAULT_FONT,
-                 grid=14, patch_size=16):
+                 grid=14, patch_size=16, augment=False):
+        self.augment = augment
         tars = sorted([str(p) for p in Path(tar_dir).glob("*.tar")])
         if num_tars:
             tars = tars[:num_tars]
@@ -139,6 +140,17 @@ class TarImageText(Dataset):
     def __len__(self):
         return len(self.index)
 
+    @staticmethod
+    def _augment_photo(img):
+        """Random augmentation on the photo only (text stays clean for reading)."""
+        from PIL import ImageEnhance
+        if random.random() < 0.5:
+            img = img.transpose(Image.FLIP_LEFT_RIGHT)
+        img = ImageEnhance.Color(img).enhance(random.uniform(0.7, 1.3))
+        img = ImageEnhance.Brightness(img).enhance(random.uniform(0.8, 1.2))
+        img = ImageEnhance.Contrast(img).enhance(random.uniform(0.8, 1.2))
+        return img
+
     def __getitem__(self, i):
         for _ in range(5):
             try:
@@ -146,6 +158,8 @@ class TarImageText(Dataset):
                 tf = _tar(tp)
                 img = Image.open(io.BytesIO(tf.extractfile(name).read()))
                 cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+                if self.augment:
+                    img = self._augment_photo(img)
                 composite, boxes = build_composite(cap, img, self.font_path)
                 t = torch.from_numpy(composite).float().permute(2, 0, 1) / 255.0
                 masks = boxes_to_cell_masks(boxes, self.grid, self.patch_size)
