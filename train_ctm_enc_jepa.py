@@ -360,6 +360,9 @@ def build_args():
                    help="epochs with UNIFIED gradient (JEPA through enhancer) before switching to split_grad; 0=always split_grad")
     p.add_argument("--freeze_backbone_after", type=int, default=-1,
                    help="freeze backbone after this epoch (prevents JEPA gradient corrupting semantic features); -1=never")
+    p.add_argument("--freeze_early_after", type=int, default=-1,
+                   help="freeze early backbone layers (stem+stage0+stage1) after this epoch, "
+                        "keeping stage2+enhancer trainable for stable semantic learning; -1=never")
     p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=2e-4, help="lr for predictor + other params")
     p.add_argument("--lr_encoder", type=float, default=2e-5, help="lr for backbone (low to protect)")
@@ -482,16 +485,40 @@ def main():
                 for p in base.backbone.parameters():
                     p.requires_grad_(False)
                 if is_main:
-                    print(f"[freeze] epoch {epoch}: backbone frozen (JEPA can't corrupt semantic features)", flush=True)
+                    print(f"[freeze] epoch {epoch}: backbone frozen", flush=True)
             elif not should_freeze and bb_frozen:
                 for p in base.backbone.parameters():
                     p.requires_grad_(True)
                 if is_main:
                     print(f"[unfreeze] epoch {epoch}: backbone unfrozen", flush=True)
+
+        # freeze early layers (stem+stage0+stage1) while keeping stage2 trainable
+        if args.freeze_early_after >= 0:
+            should_freeze_early = epoch > args.freeze_early_after
+            early_modules = [base.backbone.down_layers[0], base.backbone.stages[0],
+                             base.backbone.down_layers[1], base.backbone.stages[1],
+                             base.backbone.down_layers[2]]
+            early_frozen = all(not p.requires_grad for p in early_modules[0].parameters())
+            if should_freeze_early and not early_frozen:
+                for mod in early_modules:
+                    for p in mod.parameters():
+                        p.requires_grad_(False)
+                if is_main:
+                    print(f"[freeze_early] epoch {epoch}: stem+stage0+stage1 frozen "
+                          f"(stage2+enhancer still training)", flush=True)
+            elif not should_freeze_early and early_frozen:
+                for mod in early_modules:
+                    for p in mod.parameters():
+                        p.requires_grad_(True)
+                if is_main:
+                    print(f"[unfreeze_early] epoch {epoch}: early layers unfrozen", flush=True)
+
         if is_main:
             tag = 'sp' if split_grad else 'uni'
             if args.freeze_backbone_after >= 0 and epoch > args.freeze_backbone_after:
                 tag += '+fr'
+            if args.freeze_early_after >= 0 and epoch > args.freeze_early_after:
+                tag += '+ef'
             bar = tqdm(train, desc=f"e{epoch}({tag})", dynamic_ncols=True, mininterval=2.0)
         else:
             bar = train
