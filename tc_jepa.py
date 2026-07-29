@@ -305,8 +305,10 @@ class TCJEPA(nn.Module):
         """Rectified cosine similarity  O_{i,s} = max(cos(q_i, k_s), 0).
 
         q: (B, N, D)  k: (B, S, D)  text_mask: (B, S)
-        → (B, N, S)"""
-        cos = F.cosine_similarity(q.unsqueeze(2), k.unsqueeze(1), dim=-1)
+        → (B, N, S)   Memory-efficient: normalized bmm instead of broadcast."""
+        qn = F.normalize(q.float(), dim=-1)         # (B, N, D)
+        kn = F.normalize(k.float(), dim=-1)          # (B, S, D)
+        cos = torch.bmm(qn, kn.transpose(1, 2))      # (B, N, S)
         cos = F.relu(cos)
         if text_mask is not None:
             cos = cos * text_mask.unsqueeze(1).float()
