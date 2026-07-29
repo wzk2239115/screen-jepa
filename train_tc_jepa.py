@@ -157,7 +157,7 @@ def build_args():
     p.add_argument("--target_scale_max", type=float, default=0.25)
 
     # optimization
-    p.add_argument("--batch", type=int, default=128)
+    p.add_argument("--batch", type=int, default=256)
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--wd", type=float, default=0.04)
     p.add_argument("--warmup", type=float, default=0.05)
@@ -169,7 +169,7 @@ def build_args():
     p.add_argument("--augment", type=int, default=1)
 
     # logging
-    p.add_argument("--workers", type=int, default=8)
+    p.add_argument("--workers", type=int, default=12)
     p.add_argument("--log_every", type=int, default=50)
     p.add_argument("--save_every", type=int, default=20)
     p.add_argument("--eval_every", type=int, default=10)
