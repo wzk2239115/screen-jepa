@@ -193,6 +193,8 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
 
     # ---- model ----
+    if is_main:
+        print("[init] building model + loading T5 (first run downloads ~250MB)...", flush=True)
     model = TCJEPA(
         img_size=args.img_size,
         patch_size=args.patch_size,
@@ -221,6 +223,8 @@ def main():
     base = model_ddp.module if world > 1 else model
 
     # ---- data ----
+    if is_main:
+        print("[init] indexing dataset tars...", flush=True)
     ds = TarImageCaption(
         args.tar_dir, args.num_tars, args.img_size, augment=bool(args.augment),
     )
@@ -243,6 +247,7 @@ def main():
         n_train = sum(p.numel() for p in trainable)
         print(f"[model] trainable params: {n_train/1e6:.1f}M", flush=True)
         print(f"[train] {len(train)} steps/epoch × {args.epochs} epochs = {total_steps} steps", flush=True)
+        print("[init] starting training...", flush=True)
 
     # ---- tensorboard ----
     writer = None
