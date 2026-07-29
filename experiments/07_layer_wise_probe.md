@@ -1,8 +1,8 @@
-# 实验 7: 逐层探测——语义理解在网络中的分布
+# 实验 7: 逐层探测 + 冻结早期层——语义理解在网络中的分布与瓶颈定位
 
-- 日期:2026-07-28
-- 结论:**Backbone（所有 4 个 stage）几乎不携带语义信息（alignment gap=0.001-0.017）。所有语义能力来自 CTM enhancer 的 attention 机制——第一个 tick 就将 gap 从 0.017 跃升到 0.53（31 倍）。瓶颈在 backbone 的 16×16 patch 分辨率：字符级形状信息在 patchify 时丢失，ConvNeXt 只学到了纹理/边缘特征，没有学到文字形状。**
-- 状态:根因定位完成，明确了结构改进方向
+- 日期:2026-07-28 至 2026-07-29
+- 结论:**Backbone（所有 4 个 stage）几乎不携带语义信息（alignment gap=0.001-0.017）。所有语义能力来自 CTM enhancer 的 attention 机制——第一个 tick 就将 gap 从 0.017 跃升到 0.53（31 倍）。冻结早期层（stem+stage0+stage1）反而更差（peak 9%→5.7%），因为早期层尚未学到任何形状信息就被锁定。瓶颈在 backbone 的 16×16 patch 分辨率：字符级形状信息在 patchify 时丢失。所有训练策略已穷尽，天花板 ~20% 是架构限制。**
+- 状态:根因定位完成，训练策略穷尽，下一步是结构改进
 
 ## 1. 动机
 
@@ -159,17 +159,86 @@ backbone (patchify 丢失字符形状) > enhancer (attention 只做空间关联)
 | CLIP (tokenizer) 55.7% | Tokenizer 直接保留词级结构 |
 | Enhancer 50 tick vs 1 tick 差别小 | Attention 在 tick 1 就完成了空间关联 |
 
-## 7. 结构改进方向
+## 7. 冻结早期层实验 (--freeze_early_after)
 
-| 方向 | 思路 | 预期效果 |
-|---|---|---|
-| **Fine patch for text** | text 区域用 8×8 或 4×4 patch | 保留字符形状 → backbone gap 提升 |
-| **多尺度 backbone** | fine (text) + coarse (photo) 并行 | text 保持分辨率，photo 保持感受野 |
-| **文字形状辅助损失** | OCR-like 监督 | 直接引导 backbone 学习字符结构 |
-| **更高分辨率输入** | 448×448 (grid=28) | 更多 patch 覆盖文字区域 |
-| **专门 text stem** | CNN stem 处理文字行 | 提取笔画/字符特征 |
+### 7.1 动机
 
-## 8. 代码文件
+逐层探测显示 backbone 早期层（stem+stage0+stage1）是纹理/边缘检测器，收敛快。假设：冻结早期层后，stage2+enhancer 在稳定基础上学语义 → 更高的 peak 或 floor。
+
+### 7.2 配置
+
+```bash
+--unified_epochs 5          # 与最优配置相同
+--w_mse 0.3 --w_mse_decay_start 10 --w_mse_decay_end 20 --w_mse_min 0.0
+--freeze_early_after 5       # ep6 冻结 stem+stage0+stage1
+```
+
+冻结的模块：`down_layers[0]`, `stages[0]`, `down_layers[1]`, `stages[1]`, `down_layers[2]`
+保留可训练：`stages[2]`, `enhancer`, `predictor`, `pos`, `mask_token`
+
+### 7.3 结果
+
+```
+epoch:     0     5     10    15    20    30    50    99
+──────────────────────────────────────────────────────────
+freeze_early5  8.0%  9.0%  5.7%  5.7%  5.7%  7.3%  9.7%  10.0%
+jepa_decay10   7.7%  8.3%  19.7% 17.0% 13.3% 13.3% 12.3% 13.0%
+```
+
+**冻结后直接崩盘**：ep5=9.0% → ep10=5.7%（冻结后 4 epoch 内暴跌 37%）。之后 95 epoch 缓慢恢复到 10%，远低于不冻结的 13-14%。
+
+### 7.4 失败原因
+
+1. **ep5 时早期层尚未学到任何形状信息**（逐层探测证实 gap=0.017）
+2. 冻结把这个"零语义"状态**永久锁定**
+3. stage2 和 enhancer 被迫在**永久无语义的基础特征**上工作
+4. 这比冻融整个 backbone 更差，因为至少 backbone 整体冻结时 stage2 也不变（稳定的恒等映射），而这里 stage2 还在试图适应一个无意义的冻结基础
+
+### 7.5 与冻融整个 backbone 的对比
+
+| 策略 | 冻结范围 | Peak | ep10 | ep99 |
+|---|---|---|---|---|
+| 不冻结 (jepa_decay10) | 无 | 19.7% | 19.7% | 13.0% |
+| 冻融整个 backbone (ep10) | 全部 backbone | 19.7% | 19.7% | 10.0% |
+| 冻融早期层 (ep5) | stem+s0+s1 | 9.0% | 5.7% | 10.0% |
+
+冻融早期层比冻融整个 backbone 更差——因为 backbone 的全部层共同演化形成了一致的特征空间（即使 gap 小），冻结部分层破坏了这种一致性。
+
+## 8. 训练策略彻底穷尽总结
+
+### 8.1 所有策略一览
+
+| 策略 | 变量 | 最优值 | Peak | Floor | 退化? |
+|---|---|---|---|---|---|
+| JEPA 权重 | w_mse | 0.3 | 19.7% | ~14% | 否 (decay) |
+| JEPA 退火 | decay_start/end | 10→20 | 19.7% | ~14% | **否** |
+| 残留 JEPA | w_mse_min | 0.0 | 19.7% | ~14% | 否 |
+| JEPA 循环 | cycle | 不用 | 19.7% | ~13% | 否 |
+| 统一阶段 | unified_epochs | 5 | 19.7% | ~14% | 否 |
+| 分离梯度 | split_grad | two-stage | 19.7% | ~14% | 否 |
+| Enhancer lr | lr_enhancer | 2e-5 | 19.7% | ~14% | 否 |
+| 数据增强 | augment | 边缘改善 | 19.3% | ~15% | 否 |
+| 冻融整个 backbone | freeze_backbone | 不用 | 19.7% | ~10% | 是 |
+| 冻融早期层 | freeze_early | 不用 | 9.0% | ~10% | 是 |
+
+### 8.2 结论
+
+**所有训练策略都触碰同一个天花板 peak ~20% / floor ~14%。** 无论怎么调整 loss 权重、学习率、冻结策略、数据增强、循环调度，都无法突破。
+
+天花板来自架构限制（16×16 patch 丢失字符形状），不是训练策略问题。需要**结构改进**。
+
+## 9. 结构改进方向
+
+| 方向 | 思路 | 改动量 | 预期效果 |
+|---|---|---|---|
+| **高分辨率输入** | 448×448 (grid=28) | 小 (改 img_size) | patch 数 196→784，文字区 patch ×4 |
+| **Fine patch text** | text 区 8×8 patch | 中 (双分支 stem) | 字符形状保留 |
+| **多尺度 backbone** | fine text + coarse photo | 大 (新架构) | 兼顾分辨率和感受野 |
+| **文字形状辅助损失** | OCR-like 监督 | 中 (新 loss) | 引导 backbone 学字符 |
+| **专门 text stem** | CNN 处理文字行 | 中 (新模块) | 提取笔画特征 |
+
+## 10. 代码文件
 
 - `probe_layers.py`:逐层探测脚本（backbone stages + enhancer ticks）
+- `train_ctm_enc_jepa.py`:主训练脚本（含 freeze_early_after）
 - 使用的 checkpoint:`outputs/jepa_decay10/epoch10.pt`（peak 模型）
