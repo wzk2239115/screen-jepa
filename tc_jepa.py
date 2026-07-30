@@ -262,6 +262,7 @@ class TCJEPA(nn.Module):
         ema_tau=0.996,
         target_scale=(0.10, 0.25),
         num_target_blocks=4,
+        normalize_target=True,
     ):
         super().__init__()
         self.encoder = ViTEncoder(
@@ -290,6 +291,7 @@ class TCJEPA(nn.Module):
         self.target_scale = target_scale
         self.num_target_blocks = num_target_blocks
         self.encoder_dim = encoder_dim
+        self.normalize_target = normalize_target
 
     # ---- EMA -------------------------------------------------------
     @torch.no_grad()
@@ -315,9 +317,11 @@ class TCJEPA(nn.Module):
         return cos
 
     # ---- Forward ---------------------------------------------------
-    def forward(self, images, input_ids, attention_mask):
+    def forward(self, images, input_ids, attention_mask, lam_sparse=None, lam_consistency=None):
         B = images.size(0)
         device = images.device
+        lam_sparse = self.lam_sparse if lam_sparse is None else lam_sparse
+        lam_consistency = self.lam_consistency if lam_consistency is None else lam_consistency
 
         # 1. masks
         target_masks = gen_batch_masks(
@@ -332,6 +336,8 @@ class TCJEPA(nn.Module):
         # 3. target encoder (full image, stop-grad)
         with torch.no_grad():
             z_tgt = self.target_encoder(images)                   # (B, N, D)
+            if self.normalize_target:
+                z_tgt = F.normalize(z_tgt, dim=-1)
 
         # 4. text embeddings (T5 frozen)
         with torch.no_grad():
@@ -354,8 +360,6 @@ class TCJEPA(nn.Module):
         # 7. sparsity + consistency over all layers
         Os = [self._rectified_cos(q, k, attention_mask) for q, k in zip(qs, ks)]
         L = len(Os)
-        valid_mask = attention_mask.unsqueeze(1).float()  # (B, 1, S)
-        n_valid = valid_mask.sum(dim=-1).clamp(min=1)      # (B, 1)
 
         sparse_loss = sum(O.sum(dim=-1).mean() for O in Os) / L
 
@@ -364,7 +368,7 @@ class TCJEPA(nn.Module):
             (O - O_mean).abs().sum(dim=-1).mean() for O in Os
         ) / L
 
-        loss = l2_loss + self.lam_sparse * sparse_loss + self.lam_consistency * consistency_loss
+        loss = l2_loss + lam_sparse * sparse_loss + lam_consistency * consistency_loss
 
         stats = {
             "l2": l2_loss.detach(),

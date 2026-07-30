@@ -150,6 +150,10 @@ def build_args():
     # loss coefficients
     p.add_argument("--lam_sparse", type=float, default=0.1)
     p.add_argument("--lam_consistency", type=float, default=0.5)
+    p.add_argument("--sparse_warmup", type=int, default=20,
+                   help="epochs with lam_sparse=lam_consistency=0 (let cross-attn develop)")
+    p.add_argument("--normalize_target", type=int, default=1,
+                   help="L2-normalize target features before loss (anti-collapse)")
 
     # masking
     p.add_argument("--num_target_blocks", type=int, default=4)
@@ -210,6 +214,7 @@ def main():
         ema_tau=args.ema_tau,
         target_scale=(args.target_scale_min, args.target_scale_max),
         num_target_blocks=args.num_target_blocks,
+        normalize_target=bool(args.normalize_target),
     ).to(device)
 
     # ---- DDP ----
@@ -261,6 +266,19 @@ def main():
     for epoch in range(args.epochs):
         if world > 1:
             sampler.set_epoch(epoch)
+
+        # sparsity warmup: ramp from 0 to full over 10 epochs after warmup period
+        if epoch < args.sparse_warmup:
+            cur_lam_sp, cur_lam_con = 0.0, 0.0
+        else:
+            t = min((epoch - args.sparse_warmup) / 10.0, 1.0)
+            cur_lam_sp = args.lam_sparse * t
+            cur_lam_con = args.lam_consistency * t
+
+        if is_main and epoch <= args.sparse_warmup + 10:
+            print(f"[epoch {epoch}] lam_sparse={cur_lam_sp:.4f} lam_consistency={cur_lam_con:.4f}",
+                  flush=True)
+
         model.train()
         bar = tqdm(train, desc=f"e{epoch}", dynamic_ncols=True, mininterval=2.0,
                    disable=not is_main)
@@ -271,7 +289,8 @@ def main():
 
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
-                loss, stats = model(imgs, ids, mask)
+                loss, stats = model(imgs, ids, mask,
+                                    lam_sparse=cur_lam_sp, lam_consistency=cur_lam_con)
 
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
