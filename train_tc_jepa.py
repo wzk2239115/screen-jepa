@@ -150,8 +150,8 @@ def build_args():
     # loss coefficients
     p.add_argument("--lam_sparse", type=float, default=0.1)
     p.add_argument("--lam_consistency", type=float, default=0.5)
-    p.add_argument("--lam_reg", type=float, default=1.0,
-                   help="VICReg anti-collapse weight (variance + covariance)")
+    p.add_argument("--lam_reg", type=float, default=10.0,
+                   help="effective-rank anti-collapse weight")
     p.add_argument("--sparse_warmup", type=int, default=20,
                    help="epochs with lam_sparse=lam_consistency=0 (let cross-attn develop)")
     p.add_argument("--normalize_target", type=int, default=0,

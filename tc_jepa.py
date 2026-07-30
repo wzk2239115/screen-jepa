@@ -259,7 +259,7 @@ class TCJEPA(nn.Module):
         t5_model="t5-small",
         lam_sparse=0.1,
         lam_consistency=0.5,
-        lam_reg=1.0,
+        lam_reg=10.0,
         ema_tau=0.996,
         target_scale=(0.10, 0.25),
         num_target_blocks=4,
@@ -295,20 +295,21 @@ class TCJEPA(nn.Module):
         self.encoder_dim = encoder_dim
         self.normalize_target = normalize_target
 
-    # ---- VICReg-style anti-collapse --------------------------------
+    # ---- Anti-collapse: effective rank regularizer -----------------
     @staticmethod
-    def _vicreg(z):
-        """Scale-invariant variance + covariance regularization.
-        z: (B, N, D) → normalised, then checked for isotropy."""
-        z = F.normalize(z.reshape(-1, z.size(-1)), dim=-1)
-        D = z.size(1)
-        N = max(z.size(0) - 1, 1)
-        std = z.std(dim=0)
-        var = F.relu(1.0 / math.sqrt(D) - std).mean()
+    def _rank_reg(z):
+        """Penalise low effective rank.  Returns 1/eff_rank.
+
+        eff_rank = tr(cov)² / tr(cov²)  — computed without eigendecomposition.
+        Minimising 1/eff_rank  →  maximising eff_rank  →  spreading features
+        across more dimensions."""
+        z = z.reshape(-1, z.size(-1))
         zc = z - z.mean(dim=0)
+        N = max(z.size(0) - 1, 1)
         cov = zc.T @ zc / N
-        cov_loss = cov.fill_diagonal_(0).pow(2).sum() / D
-        return var + cov_loss
+        tr_cov = cov.trace().clamp(min=1e-6)
+        tr_cov2 = (cov ** 2).sum().clamp(min=1e-6)
+        return tr_cov2 / (tr_cov ** 2)
 
     # ---- EMA -------------------------------------------------------
     @torch.no_grad()
@@ -376,8 +377,8 @@ class TCJEPA(nn.Module):
                 pred[target_masks], z_tgt[target_masks], dim=-1
             ).mean()
 
-        # 7. VICReg anti-collapse on encoder output
-        reg_loss = self._vicreg(z_ctx)
+        # 7. effective-rank anti-collapse on encoder output
+        reg_loss = self._rank_reg(z_ctx)
 
         # 8. sparsity + consistency over all layers
         Os = [self._rectified_cos(q, k, attention_mask) for q, k in zip(qs, ks)]
