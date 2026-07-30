@@ -150,10 +150,12 @@ def build_args():
     # loss coefficients
     p.add_argument("--lam_sparse", type=float, default=0.1)
     p.add_argument("--lam_consistency", type=float, default=0.5)
+    p.add_argument("--lam_reg", type=float, default=1.0,
+                   help="VICReg anti-collapse weight (variance + covariance)")
     p.add_argument("--sparse_warmup", type=int, default=20,
                    help="epochs with lam_sparse=lam_consistency=0 (let cross-attn develop)")
-    p.add_argument("--normalize_target", type=int, default=1,
-                   help="L2-normalize target features before loss (anti-collapse)")
+    p.add_argument("--normalize_target", type=int, default=0,
+                   help="L2-normalize target features before loss")
 
     # masking
     p.add_argument("--num_target_blocks", type=int, default=4)
@@ -211,6 +213,7 @@ def main():
         t5_model=args.t5_model,
         lam_sparse=args.lam_sparse,
         lam_consistency=args.lam_consistency,
+        lam_reg=args.lam_reg,
         ema_tau=args.ema_tau,
         target_scale=(args.target_scale_min, args.target_scale_max),
         num_target_blocks=args.num_target_blocks,
@@ -290,7 +293,8 @@ def main():
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
                 loss, stats = model(imgs, ids, mask,
-                                    lam_sparse=cur_lam_sp, lam_consistency=cur_lam_con)
+                                    lam_sparse=cur_lam_sp, lam_consistency=cur_lam_con,
+                                    lam_reg=args.lam_reg)
 
             loss.backward()
             gn = torch.nn.utils.clip_grad_norm_(trainable, args.grad_clip)
@@ -310,12 +314,14 @@ def main():
                     l2=f"{float(stats['l2']):.3f}",
                     cos=f"{float(stats['cos_pt']):.3f}",
                     sp=f"{float(stats['sparse']):.3f}",
+                    reg=f"{float(stats['reg']):.3f}",
                     lr=f"{lr:.1e}",
                 )
                 if writer:
                     writer.add_scalar("train/loss", loss.item(), step)
                     writer.add_scalar("train/l2", float(stats["l2"]), step)
                     writer.add_scalar("train/cos_pt", float(stats["cos_pt"]), step)
+                    writer.add_scalar("train/reg", float(stats["reg"]), step)
                     writer.add_scalar("train/sparse", float(stats["sparse"]), step)
                     writer.add_scalar("train/consistency", float(stats["consistency"]), step)
                     writer.add_scalar("train/lr", lr, step)

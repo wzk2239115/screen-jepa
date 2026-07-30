@@ -259,6 +259,7 @@ class TCJEPA(nn.Module):
         t5_model="t5-small",
         lam_sparse=0.1,
         lam_consistency=0.5,
+        lam_reg=1.0,
         ema_tau=0.996,
         target_scale=(0.10, 0.25),
         num_target_blocks=4,
@@ -287,11 +288,27 @@ class TCJEPA(nn.Module):
 
         self.lam_sparse = lam_sparse
         self.lam_consistency = lam_consistency
+        self.lam_reg = lam_reg
         self.ema_tau = ema_tau
         self.target_scale = target_scale
         self.num_target_blocks = num_target_blocks
         self.encoder_dim = encoder_dim
         self.normalize_target = normalize_target
+
+    # ---- VICReg-style anti-collapse --------------------------------
+    @staticmethod
+    def _vicreg(z):
+        """Scale-invariant variance + covariance regularization.
+        z: (B, N, D) → normalised, then checked for isotropy."""
+        z = F.normalize(z.reshape(-1, z.size(-1)), dim=-1)
+        D = z.size(1)
+        N = max(z.size(0) - 1, 1)
+        std = z.std(dim=0)
+        var = F.relu(1.0 / math.sqrt(D) - std).mean()
+        zc = z - z.mean(dim=0)
+        cov = zc.T @ zc / N
+        cov_loss = cov.fill_diagonal_(0).pow(2).sum() / D
+        return var + cov_loss
 
     # ---- EMA -------------------------------------------------------
     @torch.no_grad()
@@ -317,11 +334,13 @@ class TCJEPA(nn.Module):
         return cos
 
     # ---- Forward ---------------------------------------------------
-    def forward(self, images, input_ids, attention_mask, lam_sparse=None, lam_consistency=None):
+    def forward(self, images, input_ids, attention_mask, lam_sparse=None,
+                lam_consistency=None, lam_reg=None):
         B = images.size(0)
         device = images.device
         lam_sparse = self.lam_sparse if lam_sparse is None else lam_sparse
         lam_consistency = self.lam_consistency if lam_consistency is None else lam_consistency
+        lam_reg = self.lam_reg if lam_reg is None else lam_reg
 
         # 1. masks
         target_masks = gen_batch_masks(
@@ -357,7 +376,10 @@ class TCJEPA(nn.Module):
                 pred[target_masks], z_tgt[target_masks], dim=-1
             ).mean()
 
-        # 7. sparsity + consistency over all layers
+        # 7. VICReg anti-collapse on encoder output
+        reg_loss = self._vicreg(z_ctx)
+
+        # 8. sparsity + consistency over all layers
         Os = [self._rectified_cos(q, k, attention_mask) for q, k in zip(qs, ks)]
         L = len(Os)
 
@@ -368,12 +390,13 @@ class TCJEPA(nn.Module):
             (O - O_mean).abs().sum(dim=-1).mean() for O in Os
         ) / L
 
-        loss = l2_loss + lam_sparse * sparse_loss + lam_consistency * consistency_loss
+        loss = l2_loss + lam_reg * reg_loss + lam_sparse * sparse_loss + lam_consistency * consistency_loss
 
         stats = {
             "l2": l2_loss.detach(),
             "sparse": sparse_loss.detach(),
             "consistency": consistency_loss.detach(),
+            "reg": reg_loss.detach(),
             "cos_pt": cos_pt.detach(),
             "tgt_ratio": target_masks.float().mean().detach(),
         }
