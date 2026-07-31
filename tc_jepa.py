@@ -264,6 +264,7 @@ class TCJEPA(nn.Module):
         target_scale=(0.10, 0.25),
         num_target_blocks=4,
         normalize_target=True,
+        temperature=0.1,
     ):
         super().__init__()
         self.encoder = ViTEncoder(
@@ -294,6 +295,7 @@ class TCJEPA(nn.Module):
         self.num_target_blocks = num_target_blocks
         self.encoder_dim = encoder_dim
         self.normalize_target = normalize_target
+        self.temperature = temperature
 
     # ---- Anti-collapse: effective rank regularizer -----------------
     @staticmethod
@@ -321,18 +323,18 @@ class TCJEPA(nn.Module):
 
     # ---- Loss helpers ----------------------------------------------
     @staticmethod
-    def _rectified_cos(q, k, text_mask):
-        """Rectified cosine similarity  O_{i,s} = max(cos(q_i, k_s), 0).
+    def _attention_probs(q, k, text_mask, temperature=0.1):
+        """Softmax-weighted cosine similarities → attention probability matrix.
 
+        Unlike rectified cosine, softmax is ALWAYS positive → no dead zone.
         q: (B, N, D)  k: (B, S, D)  text_mask: (B, S)
-        → (B, N, S)   Memory-efficient: normalized bmm instead of broadcast."""
-        qn = F.normalize(q.float(), dim=-1)         # (B, N, D)
-        kn = F.normalize(k.float(), dim=-1)          # (B, S, D)
-        cos = torch.bmm(qn, kn.transpose(1, 2))      # (B, N, S)
-        cos = F.relu(cos)
+        → (B, N, S)"""
+        qn = F.normalize(q.float(), dim=-1)
+        kn = F.normalize(k.float(), dim=-1)
+        sim = torch.bmm(qn, kn.transpose(1, 2))      # (B, N, S) cosine
         if text_mask is not None:
-            cos = cos * text_mask.unsqueeze(1).float()
-        return cos
+            sim = sim.masked_fill(~text_mask.unsqueeze(1).bool(), -1e9)
+        return (sim / temperature).softmax(dim=-1)     # (B, N, S)
 
     # ---- Forward ---------------------------------------------------
     def forward(self, images, input_ids, attention_mask, lam_sparse=None,
@@ -380,15 +382,23 @@ class TCJEPA(nn.Module):
         # 7. effective-rank anti-collapse on encoder output
         reg_loss = self._rank_reg(z_ctx)
 
-        # 8. sparsity + consistency over all layers
-        Os = [self._rectified_cos(q, k, attention_mask) for q, k in zip(qs, ks)]
+        # 8. sparsity (entropy) + consistency over all layers
+        #    Uses softmax probs instead of rectified cosine → no dead zone
+        Os = [self._attention_probs(q, k, attention_mask, self.temperature)
+              for q, k in zip(qs, ks)]
         L = len(Os)
+        S = Os[0].size(-1)
+        log_S = math.log(max(S, 2))
 
-        sparse_loss = sum(O.sum(dim=-1).mean() for O in Os) / L
+        # Sparsity: normalised entropy  H/log(S) ∈ [0,1]  (0=sparse, 1=uniform)
+        sparse_loss = sum(
+            -(p * (p + 1e-8).log()).sum(dim=-1).mean() for p in Os
+        ) / (L * log_S)
 
-        O_mean = sum(Os) / L
+        # Consistency: L1 distance from cross-layer mean
+        p_mean = sum(Os) / L
         consistency_loss = sum(
-            (O - O_mean).abs().sum(dim=-1).mean() for O in Os
+            (p - p_mean).abs().sum(dim=-1).mean() for p in Os
         ) / L
 
         loss = l2_loss + lam_reg * reg_loss + lam_sparse * sparse_loss + lam_consistency * consistency_loss

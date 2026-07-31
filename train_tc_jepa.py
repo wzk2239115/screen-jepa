@@ -150,17 +150,19 @@ def build_args():
     # loss coefficients
     p.add_argument("--lam_sparse", type=float, default=0.1)
     p.add_argument("--lam_consistency", type=float, default=0.5)
-    p.add_argument("--lam_reg", type=float, default=10.0,
+    p.add_argument("--lam_reg", type=float, default=25.0,
                    help="effective-rank anti-collapse weight")
-    p.add_argument("--sparse_warmup", type=int, default=20,
+    p.add_argument("--sparse_warmup", type=int, default=5,
                    help="epochs with lam_sparse=lam_consistency=0 (let cross-attn develop)")
+    p.add_argument("--temperature", type=float, default=0.1,
+                   help="softmax temperature for sparsity entropy loss")
     p.add_argument("--normalize_target", type=int, default=0,
                    help="L2-normalize target features before loss")
 
     # masking
-    p.add_argument("--num_target_blocks", type=int, default=4)
+    p.add_argument("--num_target_blocks", type=int, default=8)
     p.add_argument("--target_scale_min", type=float, default=0.10)
-    p.add_argument("--target_scale_max", type=float, default=0.25)
+    p.add_argument("--target_scale_max", type=float, default=0.20)
 
     # optimization
     p.add_argument("--batch", type=int, default=256)
@@ -218,6 +220,7 @@ def main():
         target_scale=(args.target_scale_min, args.target_scale_max),
         num_target_blocks=args.num_target_blocks,
         normalize_target=bool(args.normalize_target),
+        temperature=args.temperature,
     ).to(device)
 
     # ---- DDP ----
