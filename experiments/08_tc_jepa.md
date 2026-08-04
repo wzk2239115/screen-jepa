@@ -1,7 +1,7 @@
 # 实验 8: TC-JEPA — Text-Conditional JEPA on recap-datacomp
 
-- 日期:2026-07-29 至 2026-07-30
-- 状态:4 轮迭代完成，定位核心问题（sparsity dead zone + 预测任务过简单），待 v5 改进
+- 日期:2026-07-29 至 2026-08-03
+- 状态:**5 轮迭代完成**。v5 解决了 sparsity dead zone，sp 全程 > 0，top-5=15.0% (42x random)，历史最佳。
 - 前置:实验 7 确认纯像素方法（screen-jepa）无法突破 ~20% 天花板。决定放弃"脱离 tokenizer"的路线，改用 TC-JEPA 的文本条件化方案。
 
 ## 1. 动机
@@ -123,67 +123,96 @@ feat_std: -     -     0.088 0.073 0.189 0.110 0.146 0.138 0.131 0.140
 
 **最终问题**: sp 在 epoch ~70 后再次死亡（rectified cosine 死区），cos 从 0.99 退化到 0.59。
 
+### v5: Entropy sparsity + 激进 masking（最终版）
+
+**三项改进**:
+
+| 改进 | v4 → v5 | 原因 |
+|---|---|---|
+| Sparsity loss | rectified cosine → **attention entropy** | 消灭 dead zone：softmax 永远正，梯度永远存在 |
+| Masking | 4 blocks × 10-25% → **8 blocks × 10-20%** | target 覆盖 ~50% → ~62%，context 缩小 → 预测变难 → text 变必需 |
+| Warmup | 20ep → **5ep** | 趁 eff_rank 高就引入 sparsity，避免 ep10-19 塌缩窗口 |
+| lam_reg | 10 → **25** | 更强的 anti-collapse 压力 |
+
+**Entropy sparsity 公式**:
+```
+旧 (v4):  O = max(cos(q, k), 0);  L_sparse = ‖O‖₁          ← 死区：全负时 O=0, ∇=0
+新 (v5):  p = softmax(cos(q, k) / τ);  L_sparse = H(p)/log(S) ← 无死区：softmax 永远正
+          H(p) = -Σ p·log(p)    (归一化到 [0,1], 0=稀疏, 1=均匀)
+          τ = 0.1 (温度)
+```
+
+**评测结果**:
+
+```
+              epoch 40           epoch 99
+              top-5   lift       top-5   lift    sp 全程?
+──────────────────────────────────────────────────────────
+v4            13.2%   37x        ~13%    ~36x    ❌ (ep70 死亡)
+v5             3.0%    8x        15.0%   42x     ✅ (全程 > 0)
+```
+
+**v5 ep40 远差于 v4 ep40 的原因**: masking 更激进（62% vs 50% target），预测任务真正变难了。v4 在 ep3 就 cos=0.995 是假象——模型不需要 text 就能预测。v5 强制模型学习更难的预测，收敛更慢但特征质量更高。
+
+**v5 ep99 仍在上升** (ep40→ep99: 3%→15%)，说明模型还没收敛，训练更久可能继续提升。
+
 ## 4. 评测结果
 
 ### Image→Word Retrieval (probe_tc_jepa.py)
 
-epoch 40 checkpoint (sp 还活着时):
+v5 epoch 99 (最终版):
 
 ```
 n_test=500, n_words=1395, random top-5 = 0.36%
 
-top-1:  1.6%   (23x above random)
-top-5:  13.2%  (37x above random)
-top-10: 27.2%  (38x above random)
-MRR:    0.104
+top-1:  3.6%   (51x above random)
+top-5:  15.0%  (42x above random)
+top-10: 30.2%  (42x above random)
+MRR:    0.121
 ```
 
-### 对比历史实验
+### 全版本对比
 
 ```
-方法             top-5    random   lift    说明
-──────────────────────────────────────────────────────
-CLIP             55.7%    1.04%    53x     tokenizer + 对比损失
-Screen-JEPA best 19.7%    1.04%    19x     纯像素（天花板）
-TC-JEPA ep40     13.2%    0.36%    37x     lift 介于两者之间
+方法             top-5    random   lift    sp 全程?   说明
+──────────────────────────────────────────────────────────────
+CLIP             55.7%    1.04%    53x     N/A        tokenizer + 对比损失 (上限)
+Screen-JEPA      19.7%    1.04%    19x     N/A        纯像素（天花板已穷尽）
+TC-JEPA v4       13.2%    0.36%    37x     ❌ ep70    rectified cosine dead zone
+TC-JEPA v5       15.0%    0.36%    42x     ✅         entropy sparsity + 激进 masking
 ```
 
-注意：TC-JEPA 评测词表更大（1395 vs ~300），random baseline 更低（0.36% vs 1.04%），所以 lift 是更公平的对比指标。TC-JEPA 的 37x lift 已经超过 screen-jepa 的 19x，说明文本条件化确实比纯像素方法更有效。
+TC-JEPA v5 的 42x lift 接近 CLIP 的 53x（在更难的 1395 词表上），且 sp 全程保持活跃。
 
-## 5. 核心问题定位
+## 5. 核心问题与解决
 
-### 问题 1: Sparsity Dead Zone
+### 问题 1: Sparsity Dead Zone（v1-v4 共同问题）
 
 rectified cosine `max(cos(q,k), 0)` 有死区：一旦所有 cosine 变负，O=0，梯度=0，cross-attention 永久死亡。
 
-sparsity warmup（前 20 epoch λ=0）延迟了死亡（从 ep0 推到 ep~70），但没有解决根本问题。
+**v5 解决方案**: 用 softmax(cos/τ) 的熵替代 rectified cosine 的 L1 范数。softmax 保证所有值为正，梯度永远存在。
 
-### 问题 2: 预测任务过简单
+### 问题 2: 预测任务过简单（v1-v4 共同问题）
 
-4 个 target blocks × 10-25% scale ≈ 40-60% target 覆盖。context 占 40-60%，predictor 靠 self-attention + 位置信息就能预测（cos=0.995 在 ep3 就到了），text 非必需。
+4 个 target blocks × 10-25% ≈ 50% target。context 50%，predictor 不需要 text 就能预测（cos=0.995 在 ep3 到位）。
 
-当 text 非必需时：
-1. L2 loss 不提供维持 cross-attention 的梯度
-2. sparsity loss 的最小代价是把所有 cosine 推负（trivially sparse = 全零）
-3. → cross-attention 死亡
+**v5 解决方案**: 8 blocks × 10-20% ≈ 62% target。context 缩小到 38%，预测变难，text 成为必要信息源。
 
-### 根因链
+### 问题 3: 维度塌缩（v1-v3）
 
-```
-预测任务简单 → text 非必需 → sparsity 把 cosine 推负 → dead zone → 交叉注意力死亡 → cos 退化
-                                                                    ↓
-                                        L2 找到低维捷径 → eff_rank 塌缩
-```
+特征 effective rank 持续下降（8-13/768），大部分维度死亡。
 
-## 6. v5 改进方向
+**v4 解决方案**: effective rank 正则化 `tr(cov²)/tr(cov)²`，直接惩罚低维塌缩。eff_rank 提升到 147-425。
 
-| 改进 | 具体方案 | 预期效果 |
+## 6. v6 改进方向
+
+| 改进 | 预期效果 | 难度 |
 |---|---|---|
-| **更激进 masking** | target 占 60-70%，context 30-40% | 预测变难 → text 变必需 → cross-attention 保活 |
-| **去掉 dead zone** | rectified cosine → attention entropy | 永远有梯度 → sparsity 不会死亡 |
-| **缩短 warmup** | 20ep → 5ep | 趁 eff_rank 高就引入 sparsity，避免 ep10-19 的塌缩 |
-| **多 caption** | 用 LMM 生成 8 个 caption/image | 匹配论文 setup，text 信号更强 |
-| **增大 lam_reg** | 10 → 25-50 | 防止 ep10-19 的塌缩 |
+| **训练更久** (200-300ep) | v5 ep99 仍在上升，未收敛 | 低 |
+| **多 caption** (LMM 生成 8 个/image) | 匹配论文 setup，text 信号 8x 更强 | 中 |
+| **更大模型** (ViT-L/16) | 更强容量，更好的表示 | 低 |
+| **I-JEPA style masking** | 连续 context block + 分散 target | 中 |
+| **更大 T5** (t5-base, dim=768) | 更强的文本表示 | 低 |
 
 ## 7. 代码文件
 
@@ -194,15 +223,15 @@ sparsity warmup（前 20 epoch λ=0）延迟了死亡（从 ep0 推到 ep~70）�
 | `probe_tc_jepa.py` | Zero-shot image→word retrieval 评测 |
 | `paper_2605.03245v1.md` | TC-JEPA 论文原文 |
 
-## 8. 关键超参数 (v4 最终版)
+## 8. 关键超参数 (v5 最终版)
 
 ```bash
 --batch 256 --epochs 100 --lr 1e-3 --wd 0.04
 --encoder_dim 768 --encoder_depth 12 --encoder_heads 12
 --pred_dim 384 --pred_depth 6 --pred_heads 12
 --t5_model t5-small --max_caption_len 77
---lam_sparse 0.1 --lam_consistency 0.5 --lam_reg 10.0
---sparse_warmup 20 --normalize_target 0
---num_target_blocks 4 --target_scale_min 0.10 --target_scale_max 0.25
+--lam_sparse 0.1 --lam_consistency 0.5 --lam_reg 25.0
+--sparse_warmup 5 --normalize_target 0 --temperature 0.1
+--num_target_blocks 8 --target_scale_min 0.10 --target_scale_max 0.20
 --ema_tau 0.996 --grad_clip 1.0
 ```
