@@ -23,12 +23,19 @@ import argparse
 import time
 from pathlib import Path
 
-# ---- Import order matters: torch → torchvision FIRST, then transformers ----
-# The compute machine has NVIDIA custom torch (2.7.0a0+nv25.2). Importing
-# torchvision before transformers ensures C++ operators register correctly.
 import torch
-import torchvision
-import torchvision.transforms
+
+# ---- Fix: torchvision C++ ops don't match NVIDIA custom torch ----
+# Patch register_fake to silently skip missing operators instead of crashing
+_orig_rf = torch.library.register_fake
+def _safe_rf(*a, **kw):
+    try:
+        return _orig_rf(*a, **kw)
+    except RuntimeError:
+        return lambda fn: fn  # no-op decorator
+torch.library.register_fake = _safe_rf
+
+import torchvision  # now safe to import
 from PIL import Image
 
 
