@@ -17,23 +17,18 @@ Usage (8 GPUs, one process per GPU):
 import io
 import os
 import sys
-import types
 import json
 import tarfile
 import argparse
 import time
 from pathlib import Path
 
-# ---- Workaround: torchvision/torch version mismatch on compute machine ----
-# transformers tries to import torchvision.io which crashes with NVIDIA custom torch.
-# We create a stub so the import succeeds; PIL is used for actual image loading.
-if "torchvision.io" not in sys.modules:
-    _stub = types.ModuleType("torchvision.io")
-    _stub.ImageReadMode = type("ImageReadMode", (), {"UNK": 0, "GRAY": 1, "RGB": 2, "RGBA": 3})
-    _stub.decode_image = lambda *a, **kw: None
-    sys.modules["torchvision.io"] = _stub
-
+# ---- Import order matters: torch → torchvision FIRST, then transformers ----
+# The compute machine has NVIDIA custom torch (2.7.0a0+nv25.2). Importing
+# torchvision before transformers ensures C++ operators register correctly.
 import torch
+import torchvision
+import torchvision.transforms
 from PIL import Image
 
 
