@@ -40,12 +40,12 @@ from PIL import Image
 
 
 SHORT_PROMPT = "Describe the image briefly in one sentence."
-LONG_PROMPT = "Describe the image in detail, covering the main subjects, colors, setting, and notable features."
+LONG_PROMPT = "Describe the image in detail."
 
-NUM_SHORT = 4
-NUM_LONG = 4
-MAX_NEW_SHORT = 64
-MAX_NEW_LONG = 256
+NUM_SHORT = 1
+NUM_LONG = 1
+MAX_NEW_SHORT = 48
+MAX_NEW_LONG = 128
 
 
 def load_model(model_path, gpu_id):
