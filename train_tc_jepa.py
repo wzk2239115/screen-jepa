@@ -38,9 +38,10 @@ def _tar(path):
 
 
 class TarImageCaption(Dataset):
-    """Stream images + raw captions from webdataset-style tars."""
+    """Stream images + captions from webdataset-style tars.
+    If multicap_dir is provided, loads multiple captions per image from JSON."""
 
-    def __init__(self, tar_dir, num_tars=None, img_size=224, augment=True):
+    def __init__(self, tar_dir, num_tars=None, img_size=224, augment=True, multicap_dir=None):
         import tarfile
         tars = sorted(str(p) for p in Path(tar_dir).glob("*.tar"))
         if num_tars:
@@ -68,6 +69,14 @@ class TarImageCaption(Dataset):
             self.transform = transforms.Resize((img_size, img_size))
 
         self.norm = transforms.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
+
+        # Load multi-caption index
+        self.multicaps = {}
+        if multicap_dir:
+            for f in Path(multicap_dir).glob("*.captions.json"):
+                self.multicaps[f.stem] = json.loads(f.read_text())
+            print(f"[data] loaded multi-captions for {len(self.multicaps)} tars", flush=True)
+
         print(f"[data] indexed {len(self.index)} pairs from {good}/{len(tars)} tars", flush=True)
 
     def __len__(self):
@@ -80,25 +89,46 @@ class TarImageCaption(Dataset):
                 tp, name = self.index[_r.randint(0, len(self.index) - 1)]
                 tf = _tar(tp)
                 img = Image.open(io.BytesIO(tf.extractfile(name).read())).convert("RGB")
-                cap = json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+                key = name.replace(".jpg", "")
+                tar_stem = Path(tp).stem
+
+                # Use multi-caption if available, else original caption
+                if tar_stem in self.multicaps and key in self.multicaps[tar_stem]:
+                    caps = self.multicaps[tar_stem][key]
+                    if not caps:
+                        caps = ["a photo"]
+                else:
+                    cap = json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+                    caps = [cap]
+
                 img = self.transform(img)
                 t = transforms.functional.to_tensor(img)
                 t = self.norm(t)
-                return t, cap
+                return t, caps
             except Exception:
                 continue
-        return torch.zeros(3, self.img_size, self.img_size), ""
+        return torch.zeros(3, self.img_size, self.img_size), ["a photo"]
 
 
-def make_collate(tokenizer, max_length=77):
+def make_collate(tokenizer, max_length=77, num_captions=2):
     def collate(batch):
         imgs = torch.stack([b[0] for b in batch])
-        caps = [b[1] if b[1] else "a photo" for b in batch]
-        enc = tokenizer(
-            caps, padding="max_length", truncation=True,
-            max_length=max_length, return_tensors="pt",
-        )
-        return imgs, enc["input_ids"], enc["attention_mask"]
+        # Each item has a list of captions; sample num_captions per image
+        per_cap = [[] for _ in range(num_captions)]
+        for b in batch:
+            caps = b[1] if b[1] else ["a photo"]
+            for n in range(num_captions):
+                per_cap[n].append(caps[n % len(caps)])
+
+        input_ids_list, attention_mask_list = [], []
+        for caps in per_cap:
+            enc = tokenizer(
+                caps, padding="max_length", truncation=True,
+                max_length=max_length, return_tensors="pt",
+            )
+            input_ids_list.append(enc["input_ids"])
+            attention_mask_list.append(enc["attention_mask"])
+        return imgs, input_ids_list, attention_mask_list
     return collate
 
 
@@ -129,6 +159,10 @@ def build_args():
     import argparse
     p = argparse.ArgumentParser()
     p.add_argument("--tar_dir", required=True)
+    p.add_argument("--multicap_dir", type=str, default=None,
+                   help="Directory with multi-caption JSON files from Qwen3-VL")
+    p.add_argument("--num_captions", type=int, default=2,
+                   help="Number of captions to sample per image")
     p.add_argument("--num_tars", type=int, default=81)
     p.add_argument("--img_size", type=int, default=224)
     p.add_argument("--patch_size", type=int, default=16)
@@ -237,10 +271,12 @@ def main():
     if is_main:
         print("[init] indexing dataset tars...", flush=True)
     ds = TarImageCaption(
-        args.tar_dir, args.num_tars, args.img_size, augment=bool(args.augment),
+        args.tar_dir, args.num_tars, args.img_size,
+        augment=bool(args.augment), multicap_dir=args.multicap_dir,
     )
     sampler = DistributedSampler(ds) if world > 1 else None
-    collate = make_collate(model.text_encoder.tokenizer, args.max_caption_len)
+    collate = make_collate(model.text_encoder.tokenizer, args.max_caption_len,
+                           num_captions=args.num_captions)
     train = DataLoader(
         ds, batch_size=args.batch, sampler=sampler, shuffle=sampler is None,
         num_workers=args.workers, pin_memory=True, drop_last=True, collate_fn=collate,
@@ -288,14 +324,14 @@ def main():
         model.train()
         bar = tqdm(train, desc=f"e{epoch}", dynamic_ncols=True, mininterval=2.0,
                    disable=not is_main)
-        for imgs, ids, mask in bar:
+        for imgs, ids_list, mask_list in bar:
             imgs = imgs.to(device, non_blocking=True)
-            ids = ids.to(device, non_blocking=True)
-            mask = mask.to(device, non_blocking=True)
+            ids_list = [x.to(device, non_blocking=True) for x in ids_list]
+            mask_list = [x.to(device, non_blocking=True) for x in mask_list]
 
             opt.zero_grad(set_to_none=True)
             with torch.autocast("cuda", enabled=amp, dtype=torch.bfloat16):
-                loss, stats = model(imgs, ids, mask,
+                loss, stats = model(imgs, ids_list, mask_list,
                                     lam_sparse=cur_lam_sp, lam_consistency=cur_lam_con,
                                     lam_reg=args.lam_reg)
 

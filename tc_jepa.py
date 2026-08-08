@@ -337,69 +337,74 @@ class TCJEPA(nn.Module):
         return (sim / temperature).softmax(dim=-1)     # (B, N, S)
 
     # ---- Forward ---------------------------------------------------
-    def forward(self, images, input_ids, attention_mask, lam_sparse=None,
-                lam_consistency=None, lam_reg=None):
+    def forward(self, images, input_ids_list, attention_mask_list,
+                lam_sparse=None, lam_consistency=None, lam_reg=None):
+        """input_ids_list / attention_mask_list: list of (B, S) tensors,
+        one per caption.  Single-caption = list of 1."""
         B = images.size(0)
         device = images.device
         lam_sparse = self.lam_sparse if lam_sparse is None else lam_sparse
         lam_consistency = self.lam_consistency if lam_consistency is None else lam_consistency
         lam_reg = self.lam_reg if lam_reg is None else lam_reg
+        N_cap = len(input_ids_list)
 
-        # 1. masks
+        # 1. masks (shared)
         target_masks = gen_batch_masks(
             B, self.grid, device=device,
-            num_blocks=self.num_target_blocks,
-            scale_range=self.target_scale,
-        )  # (B, N) bool
+            num_blocks=self.num_target_blocks, scale_range=self.target_scale,
+        )
 
-        # 2. context encoder (target patches masked out)
-        z_ctx = self.encoder(images, target_mask=target_masks)   # (B, N, D)
+        # 2. context encoder (shared)
+        z_ctx = self.encoder(images, target_mask=target_masks)
 
-        # 3. target encoder (full image, stop-grad)
+        # 3. target encoder (shared, stop-grad)
         with torch.no_grad():
-            z_tgt = self.target_encoder(images)                   # (B, N, D)
+            z_tgt = self.target_encoder(images)
             if self.normalize_target:
                 z_tgt = F.normalize(z_tgt, dim=-1)
 
-        # 4. text embeddings (T5 frozen)
-        with torch.no_grad():
-            text_emb = self.text_encoder(input_ids, attention_mask)  # (B, S, D_t)
+        # 4. anti-collapse on encoder output
+        reg_loss = self._rank_reg(z_ctx)
 
-        # 5. predictor
-        pred, qs, ks = self.predictor(z_ctx, target_masks, text_emb, attention_mask)
+        # 5. per-caption: T5 + predictor + losses
+        all_preds = []
+        sparse_acc, cons_acc = 0.0, 0.0
 
-        # 6. L2 predictive loss (only at target positions)
-        se = ((pred - z_tgt.detach()) ** 2).mean(dim=-1)  # (B, N)
+        for n in range(N_cap):
+            ids, amask = input_ids_list[n], attention_mask_list[n]
+            with torch.no_grad():
+                text_emb = self.text_encoder(ids, amask)
+            pred_n, qs_n, ks_n = self.predictor(z_ctx, target_masks, text_emb, amask)
+            all_preds.append(pred_n)
+
+            Os = [self._attention_probs(q, k, amask, self.temperature)
+                  for q, k in zip(qs_n, ks_n)]
+            L = len(Os)
+            S = Os[0].size(-1)
+            log_S = math.log(max(S, 2))
+            sparse_acc += sum(
+                -(p * (p + 1e-8).log()).sum(dim=-1).mean() for p in Os
+            ) / (L * log_S)
+            p_mean = sum(Os) / L
+            cons_acc += sum(
+                (p - p_mean).abs().sum(dim=-1).mean() for p in Os
+            ) / L
+
+        sparse_loss = sparse_acc / N_cap
+        consistency_loss = cons_acc / N_cap
+
+        # 6. fuse predictions via MaxPool across captions
+        pred = torch.stack(all_preds, dim=0).max(dim=0)[0]
+
+        # 7. L2 loss on fused prediction
+        se = ((pred - z_tgt.detach()) ** 2).mean(dim=-1)
         n_tgt = target_masks.sum().clamp(min=1)
         l2_loss = (se * target_masks).sum() / n_tgt
 
-        # cosine similarity between pred and target (diagnostic)
         with torch.no_grad():
             cos_pt = F.cosine_similarity(
                 pred[target_masks], z_tgt[target_masks], dim=-1
             ).mean()
-
-        # 7. effective-rank anti-collapse on encoder output
-        reg_loss = self._rank_reg(z_ctx)
-
-        # 8. sparsity (entropy) + consistency over all layers
-        #    Uses softmax probs instead of rectified cosine → no dead zone
-        Os = [self._attention_probs(q, k, attention_mask, self.temperature)
-              for q, k in zip(qs, ks)]
-        L = len(Os)
-        S = Os[0].size(-1)
-        log_S = math.log(max(S, 2))
-
-        # Sparsity: normalised entropy  H/log(S) ∈ [0,1]  (0=sparse, 1=uniform)
-        sparse_loss = sum(
-            -(p * (p + 1e-8).log()).sum(dim=-1).mean() for p in Os
-        ) / (L * log_S)
-
-        # Consistency: L1 distance from cross-layer mean
-        p_mean = sum(Os) / L
-        consistency_loss = sum(
-            (p - p_mean).abs().sum(dim=-1).mean() for p in Os
-        ) / L
 
         loss = l2_loss + lam_reg * reg_loss + lam_sparse * sparse_loss + lam_consistency * consistency_loss
 
