@@ -54,7 +54,7 @@ def _tar(path):
 
 
 class TarImageTextCLIP(Dataset):
-    def __init__(self, tar_dir, num_tars=None, img_size=224, max_len=77):
+    def __init__(self, tar_dir, num_tars=None, img_size=224, max_len=77, multicap_dir=None):
         tars = sorted([str(p) for p in Path(tar_dir).glob("*.tar")])
         if num_tars:
             tars = tars[:num_tars]
@@ -73,6 +73,13 @@ class TarImageTextCLIP(Dataset):
                 print(f"[data] skip corrupt tar {tp}: {e}", flush=True)
         self.img_size = img_size
         self.max_len = max_len
+
+        self.multicaps = {}
+        if multicap_dir:
+            for f in Path(multicap_dir).glob("*.captions.json"):
+                self.multicaps[f.stem] = json.loads(f.read_text())
+            print(f"[data] loaded multi-captions for {len(self.multicaps)} tars", flush=True)
+
         print(f"[data] indexed {len(self.index)} pairs from {good}/{len(tars)} tars", flush=True)
 
     def __len__(self):
@@ -85,7 +92,15 @@ class TarImageTextCLIP(Dataset):
                 tp, name = self.index[random.randint(0, len(self.index) - 1)]
                 tf = _tar(tp)
                 img = Image.open(io.BytesIO(tf.extractfile(name).read()))
-                cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+                key = name.replace(".jpg", "")
+                tar_stem = Path(tp).stem
+
+                if tar_stem in self.multicaps and key in self.multicaps[tar_stem]:
+                    caps = self.multicaps[tar_stem][key]
+                    cap = random.choice(caps) if caps else "a photo"
+                else:
+                    cap = self.json.loads(tf.extractfile(name.replace(".jpg", ".json")).read())["caption"]
+
                 img = img.convert("RGB").resize((self.img_size, self.img_size))
                 t = torch.from_numpy(np.array(img)).float().permute(2, 0, 1) / 255.0
                 t = (t - 0.5) / 0.5
@@ -171,6 +186,8 @@ def clip_loss(img_feat, txt_feat, logit_scale, world=1):
 def build_args():
     p = argparse.ArgumentParser()
     p.add_argument("--tar_dir", required=True)
+    p.add_argument("--multicap_dir", type=str, default=None,
+                   help="Directory with multi-caption JSON files")
     p.add_argument("--num_tars", type=int, default=81)
     p.add_argument("--img_size", type=int, default=224)
     p.add_argument("--hidden", type=int, default=768)
@@ -202,7 +219,8 @@ def main():
         out.mkdir(parents=True, exist_ok=True)
     torch.manual_seed(args.seed)
 
-    ds = TarImageTextCLIP(args.tar_dir, args.num_tars, args.img_size, args.max_len)
+    ds = TarImageTextCLIP(args.tar_dir, args.num_tars, args.img_size, args.max_len,
+                           multicap_dir=args.multicap_dir)
     if world > 1:
         sampler = DistributedSampler(ds, shuffle=True, drop_last=True)
         train = DataLoader(ds, batch_size=args.batch, sampler=sampler,

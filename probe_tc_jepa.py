@@ -38,18 +38,31 @@ def clean_word(w):
 def load_model(ckpt_path, device):
     ck = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     args = ck["args"]
-    from tc_jepa import TCJEPA
-    model = TCJEPA(
-        img_size=args["img_size"], patch_size=args["patch_size"],
-        encoder_dim=args["encoder_dim"], encoder_depth=args["encoder_depth"],
-        encoder_heads=args["encoder_heads"],
-        pred_dim=args["pred_dim"], pred_depth=args["pred_depth"],
-        pred_heads=args["pred_heads"],
-        t5_model=args["t5_model"],
-    )
-    model.load_state_dict(ck["model"], strict=False)
-    model = model.to(device).eval()
-    print(f"[model] loaded {ckpt_path}", flush=True)
+
+    if args.get("arch") == "clip":
+        from train_clip import CLIPModel
+        model = CLIPModel(
+            hidden=args["hidden"], img_size=args["img_size"],
+            patch=16, text_layers=args["text_layers"], text_heads=args["text_heads"],
+        )
+        model.load_state_dict(ck["model"])
+        model = model.to(device).eval()
+        model._is_clip = True
+    else:
+        from tc_jepa import TCJEPA
+        model = TCJEPA(
+            img_size=args["img_size"], patch_size=args["patch_size"],
+            encoder_dim=args["encoder_dim"], encoder_depth=args["encoder_depth"],
+            encoder_heads=args["encoder_heads"],
+            pred_dim=args["pred_dim"], pred_depth=args["pred_depth"],
+            pred_heads=args["pred_heads"],
+            t5_model=args["t5_model"],
+        )
+        model.load_state_dict(ck["model"], strict=False)
+        model = model.to(device).eval()
+        model._is_clip = False
+
+    print(f"[model] loaded {ckpt_path} ({'CLIP' if model._is_clip else 'TC-JEPA'})", flush=True)
     return model, args
 
 
@@ -59,8 +72,11 @@ def encode_images(model, images, device, batch_size=64):
     with torch.no_grad():
         for i in range(0, len(images), batch_size):
             batch = torch.stack(images[i:i+batch_size]).to(device)
-            z = model.target_encoder(batch)      # (B, 196, D)
-            z = z.mean(dim=1)                      # (B, D) avg pool
+            if getattr(model, "_is_clip", False):
+                z = model.encode_image(batch)       # (B, D) already global + normalized
+            else:
+                z = model.target_encoder(batch)     # (B, 196, D)
+                z = z.mean(dim=1)                    # (B, D)
             feats.append(F.normalize(z.cpu(), dim=-1))
     return torch.cat(feats, dim=0)
 
